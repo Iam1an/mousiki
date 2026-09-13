@@ -103,55 +103,131 @@ if ! print_dep "cmake" "cmake"; then
 fi
 
 # -------------------------------
-# Python package manager
+# Python environment
 # -------------------------------
+# syncedlyrics is a SOFT dependency: mousiki must still build and run
+# without it, regardless of what Python environment (or lack thereof)
+# the user has. Nothing in this section is allowed to exit the script.
 
-PIP_PATH="$(command -v pip 2>/dev/null || true)"
-PIPX_PATH="$(command -v pipx 2>/dev/null || true)"
+echo "======== Checking Python environment =========="
 
-if [[ "$PIPX_PATH" == /usr/* ]]; then
-    PIP_MANAGER="pipx"
-    PIP_MANAGER_PATH="$PIPX_PATH"
-elif [[ "$PIP_PATH" == /usr/* ]]; then
-    PIP_MANAGER="pip"
-    PIP_MANAGER_PATH="$PIP_PATH"
-elif [ -n "$PIPX_PATH" ]; then
-    PIP_MANAGER="pipx"
-    PIP_MANAGER_PATH="$PIPX_PATH"
-elif [ -n "$PIP_PATH" ]; then
-    PIP_MANAGER="pip"
-    PIP_MANAGER_PATH="$PIP_PATH"
+PIP_CMD="$(command -v pip 2>/dev/null || true)"
+PIP3_CMD="$(command -v pip3 2>/dev/null || true)"
+PIPX_CMD="$(command -v pipx 2>/dev/null || true)"
+
+PY_MANAGERS=()
+
+if [ -n "$PIPX_CMD" ]; then
+    printf "%-14s ✓  (%s)\n" "pipx" "$PIPX_CMD"
+    PY_MANAGERS+=("pipx")
 else
-    echo "Error: neither pip nor pipx is installed."
-    exit 1
+    printf "%-14s ✗\n" "pipx"
 fi
 
-echo "Python package manager: $PIP_MANAGER"
-echo "  $PIP_MANAGER_PATH"
+if [ -n "$PIP3_CMD" ]; then
+    printf "%-14s ✓  (%s)\n" "pip3" "$PIP3_CMD"
+    PY_MANAGERS+=("pip3")
+else
+    printf "%-14s ✗\n" "pip3"
+fi
+
+if [ -n "$PIP_CMD" ]; then
+    printf "%-14s ✓  (%s)\n" "pip" "$PIP_CMD"
+    PY_MANAGERS+=("pip")
+else
+    printf "%-14s ✗\n" "pip"
+fi
+
+echo ""
 
 # -------------------------------
-# Python dependency
+# syncedlyrics (soft dependency)
 # -------------------------------
 
-if [ "$PIP_MANAGER" = "pip" ]; then
+SYNCEDLYRICS_OK=false
 
+syncedlyrics_installed() {
+    # Covers pip/pip3 installs (regular or --user) into the active interpreter.
     if "$PYTHON_CMD" -c "import syncedlyrics" >/dev/null 2>&1; then
-        printf "%-14s ✓\n" "syncedlyrics"
-    else
-        printf "%-14s ✗\n" "syncedlyrics"
-        MISSING+=("syncedlyrics")
+        return 0
     fi
 
-elif [ "$PIP_MANAGER" = "pipx" ]; then
-
-    if "$PIP_MANAGER_PATH" list 2>/dev/null | grep -q '^syncedlyrics '; then
-        printf "%-14s ✓\n" "syncedlyrics"
-    else
-        printf "%-14s ✗\n" "syncedlyrics"
-        MISSING+=("syncedlyrics")
+    # Covers pipx's isolated venv installs. `pipx list --short` prints a
+    # predictable "<name> <version>" line per app, unlike the indented
+    # human-readable `pipx list`, which is not safe to grep by anchor.
+    if [ -n "$PIPX_CMD" ] && "$PIPX_CMD" list --short 2>/dev/null | grep -q '^syncedlyrics '; then
+        return 0
     fi
 
+    return 1
+}
+
+install_syncedlyrics() {
+    local mgr
+
+    for mgr in "${PY_MANAGERS[@]}"; do
+        echo "==> Trying to install syncedlyrics with $mgr..."
+
+        case "$mgr" in
+            pipx)
+                if "$PIPX_CMD" install syncedlyrics >/dev/null 2>&1; then
+                    echo "Installed syncedlyrics with pipx."
+                    return 0
+                fi
+                ;;
+            pip3)
+                if "$PIP3_CMD" install --user syncedlyrics >/dev/null 2>&1; then
+                    echo "Installed syncedlyrics with pip3."
+                    return 0
+                fi
+                ;;
+            pip)
+                if "$PIP_CMD" install --user syncedlyrics >/dev/null 2>&1; then
+                    echo "Installed syncedlyrics with pip."
+                    return 0
+                fi
+                ;;
+        esac
+
+        echo "    $mgr failed or is already in a weird state, trying next option..."
+    done
+
+    return 1
+}
+
+if syncedlyrics_installed; then
+    printf "%-14s ✓\n" "syncedlyrics"
+    SYNCEDLYRICS_OK=true
+else
+    printf "%-14s ✗  (optional)\n" "syncedlyrics"
+    echo ""
+
+    if [ ${#PY_MANAGERS[@]} -eq 0 ]; then
+        echo "No Python package manager (pip, pip3, pipx) was found."
+        echo "syncedlyrics is optional, so setup will continue without it."
+        echo "Install pip/pip3/pipx and re-run this script later to add it."
+    else
+        if install_syncedlyrics; then
+            if syncedlyrics_installed; then
+                SYNCEDLYRICS_OK=true
+            else
+                echo ""
+                echo "syncedlyrics reported a successful install but could not"
+                echo "be verified. Continuing anyway since it is optional."
+            fi
+        else
+            echo ""
+            echo "Could not install syncedlyrics automatically."
+            echo "This is optional -- mousiki will still build and run without it."
+            echo "You can install it later yourself, e.g.:"
+            [ -n "$PIPX_CMD" ] && echo "  pipx install syncedlyrics"
+            [ -n "$PIP3_CMD" ] && echo "  pip3 install --user syncedlyrics"
+            [ -n "$PIP_CMD" ] && echo "  pip install --user syncedlyrics"
+        fi
+    fi
 fi
+
+echo ""
 
 # -------------------------------
 # Install missing dependencies
@@ -242,24 +318,6 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 
 # -------------------------------
-# Install Python dependencies
-# -------------------------------
-
-if [[ " ${MISSING[*]} " == *" syncedlyrics "* ]]; then
-
-    echo ""
-    echo "==> Installing syncedlyrics..."
-
-    if [ "$PIP_MANAGER" = "pip" ]; then
-        "$PYTHON_CMD" -m pip install syncedlyrics
-
-    elif [ "$PIP_MANAGER" = "pipx" ]; then
-        "$PIP_MANAGER_PATH" install syncedlyrics
-    fi
-
-fi
-
-# -------------------------------
 # Verify dependencies again
 # -------------------------------
 
@@ -278,23 +336,14 @@ if [ "$IS_TERMUX" = true ] && ! check_command clang; then
     exit 1
 fi
 
-if [ "$PIP_MANAGER" = "pip" ]; then
-
-    if ! "$PYTHON_CMD" -c "import syncedlyrics" >/dev/null 2>&1; then
-        echo "Error: syncedlyrics is not installed correctly."
-        exit 1
-    fi
-
-elif [ "$PIP_MANAGER" = "pipx" ]; then
-
-    if ! "$PIP_MANAGER_PATH" list 2>/dev/null | grep -q '^syncedlyrics '; then
-        echo "Error: syncedlyrics is not installed correctly."
-        exit 1
-    fi
-
+if [ "$SYNCEDLYRICS_OK" = true ]; then
+    printf "%-14s ✓\n" "syncedlyrics"
+else
+    printf "%-14s ✗  (optional, skipping)\n" "syncedlyrics"
 fi
 
-echo "All dependencies are ready."
+echo ""
+echo "All required dependencies are ready."
 echo ""
 
 # -------------------------------
