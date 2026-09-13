@@ -4,17 +4,16 @@
 
 <p align="center">
   <a href="https://opensource.org/" target="_blank">
-    <img src="https://i0.wp.com/opensource.org/wp-content/uploads/2023/03/cropped-OSI-horizontal-large.png?fit=640%2C229&quality=80&ssl=1" alt="OSI" height="52" />
-  </a>
-  &nbsp;
-  <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank">
-    <img src="https://www.apache.org/images/oakleaf.svg" alt="Apache" height="52" />
-  </a>
+    <img src="https://i0.wp.com/opensource.org/wp-content/uploads/2023/03/cropped-OSI-horizontal-large.png?fit=640%2C229&quality=80&ssl=1" alt="OSI" height="52" /></a>
+&nbsp;
+  <a href="https://www.apache.org/" target="_blank">
+    <img src="https://www.apache.org/images/oakleaf.svg" alt="Apache" height="52" /></a>
 </p>
+
 
 > [!NOTE]
 > **Developer note:** Mousiki is released under the Apache License 2.0.
-> You are free to use, modify, fork, redistribute, and sell the software,
+> You are free to use, modify, fork, re-distribute, and sell the software,
 > subject to the terms of the license.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/itzender5820/mousiki/blob/main/LICENSE)
