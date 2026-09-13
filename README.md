@@ -2,13 +2,27 @@
 
 # Mousiki 🎵
 
-![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
-![Language](https://img.shields.io/badge/Language-C++17-orange.svg)
-![Platform](https://img.shields.io/badge/Platform-Linux_%7C_macOS_%7C_Android-brightgreen.svg)
+<p align="center">
+  <a href="https://opensource.org/" target="_blank">
+    <img src="https://i0.wp.com/opensource.org/wp-content/uploads/2023/03/cropped-OSI-horizontal-large.png?fit=640%2C229&quality=80&ssl=1" alt="OSI" height="52" />
+  </a>
+  &nbsp;
+  <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank">
+    <img src="https://www.apache.org/images/oakleaf.svg" alt="Apache" height="52" />
+  </a>
+</p>
 
-Hey there! Welcome to **Mousiki**, a terminal music player built from the ground up for people who prefer control, simplicity, and a keyboard.
+> [!NOTE]
+> **Developer note:** Mousiki is released under the Apache License 2.0.
+> You are free to use, modify, fork, redistribute, and sell the software,
+> subject to the terms of the license.
 
-I created Mousiki because I wanted a fast, focused TUI (Terminal User Interface) without any unnecessary interface layers. It’s designed to be completely keyboard-driven and fully configurable while giving you rich features like spectrum visualizers, synced lyrics, and online streaming—all without ever leaving your terminal.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/itzender5820/mousiki/blob/main/LICENSE)
+[![Language](https://img.shields.io/badge/Language-C++17-orange.svg)](https://github.com/itzender5820/mousiki)
+[![Platform](https://img.shields.io/badge/Platform-Linux_%7C_Android_%7C_MacOS-brightgreen.svg)](https://github.com/itzender5820/mousiki)
+
+Mousiki is a terminal music player built from the ground up for people who prefer control, simplicity, and a keyboard. It's a fast, focused TUI (Terminal User Interface) without unnecessary interface layers — fully keyboard-driven and configurable, with spectrum visualizers, synced lyrics, and online streaming, all without leaving your terminal.
+
 
 ## Preview
 
@@ -30,7 +44,8 @@ I created Mousiki because I wanted a fast, focused TUI (Terminal User Interface)
 - **Unverified Support:** *Windows*. (Support for Windows is currently not verified because I don't have the hardware access needed to test and debug on that operating system. If you try it out and get it working, feel free to contribute!)
 
 ## 🛠️ Getting Started
-
+<div align="center">
+  
 ## Default Keybindings
 
 Configurable in `$HOME/.config/mousiki/config.txt`.
@@ -58,6 +73,7 @@ Configurable in `$HOME/.config/mousiki/config.txt`.
 | **Clear Filter** | `c` | Reset active search/filters |
 | **Quit** | `q` | Exit application |
 
+</div>
 
 ### Prerequisites & Installation
 
@@ -104,6 +120,8 @@ Mousiki stands on the shoulders of giants. A huge thank you to the developers be
 - **[syncedlyrics](https://github.com/rtcq/syncedlyrics):** Python package fetching the synced lyrics data.
 - **[FFmpeg](https://ffmpeg.org/):** The Swiss army knife of multimedia handling.
 
+<div align="center">
+
 ## 📜 License
 
 This project is open-sourced under the [Apache License 2.0](LICENSE). 
@@ -128,3 +146,5 @@ This project is open-sourced under the [Apache License 2.0](LICENSE).
     alt="Trust me"
   />
 </p>
+
+</div>
