@@ -136,7 +136,7 @@ This project is open-sourced under the [Apache License 2.0](LICENSE).
 </a>
 
 ---
-*Crafted with ❤️ for the terminal by [itzender5820](https://github.com/itzender5820)*
+*made by [itzender5820](https://github.com/itzender5820)*
 
 
 <p align="center">
