@@ -22,9 +22,6 @@
 
 Mousiki is a terminal music player built from the ground up for people who prefer control, simplicity, and a keyboard. It's a fast, focused TUI (Terminal User Interface) without unnecessary interface layers — fully keyboard-driven and configurable, with spectrum visualizers, synced lyrics, and online streaming, all without leaving your terminal.
 
-
-<a href="https://trendshift.io/repositories/220724?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-220724" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/220724/daily?language=C%2B%2B" alt="itzender5820%2Fmousiki | Trendshift" width="250" height="55"/></a>
-
 ## Preview
 
 ![Mousiki Preview](./preview.gif)
