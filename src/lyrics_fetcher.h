@@ -18,7 +18,7 @@ struct LyricLine {
 
 enum class LyricsStatus {
     Ok,
-    ModuleMissing,   // syncedlyrics not installed -> show pip-install hint
+    ModuleMissing,   // Python 'requests' package not installed -> show pip-install hint
     PythonMissing,   // python3 not found on PATH
     NotFound,        // ran fine, no lyrics available for this track
     Error,
@@ -28,24 +28,18 @@ struct LyricsResult {
     LyricsStatus status = LyricsStatus::Error;
     std::vector<LyricLine> lines;
     std::string message;   // human-readable status/error, shown in the lyrics panel
-    std::string source;    // "local" | "syncedlyrics" | ""
+    std::string source;    // "local" | "better-lyrics" | "lrclib" | ""
     std::string raw_lrc;   // the raw LRC text, kept so it can be cached to a sidecar file
 };
 
 // Priority chain: a local sidecar .lrc file next to `track_path` (checked
-// first, no subprocess spawned at all) -> syncedlyrics (word-level
-// "enhanced" search, falling back to plain line-synced search). Paxsenix
-// was previously a fallback source here but was dropped for being
-// unreliable — syncedlyrics is slower but consistently accurate, which
-// matters more than speed for a background fetch. Whatever comes back
-// from a network fetch is written back to the sidecar file, so the next
-// time this track plays (even offline) it's a local-file hit.
-//
-// "Better Lyrics" was requested for this chain too but isn't wired in:
-// its API needs a YouTube video ID plus a Google API key behind a
-// self-hosted Cloudflare Worker (see better-lyrics/api on GitHub) — not
-// something with a simple public endpoint to call directly, so it's
-// skipped rather than faked.
+// first, no subprocess spawned at all) -> the Python helper script
+// (scripts/fetch_lyrics.py), which tries Better Lyrics first (word-level
+// TTML, converted to enhanced LRC) and falls back to LRCLIB (line-synced
+// only) if Better Lyrics has nothing -- see scripts/lrc.py. Whatever
+// comes back from a network fetch is written back to the sidecar file,
+// so the next time this track plays (even offline) it's a local-file
+// hit.
 LyricsResult fetch_synced_lyrics(const std::string& title, const std::string& artist,
                                   const std::string& helper_script_path,
                                   const fs::path& track_path = fs::path(),

@@ -215,6 +215,7 @@ const char* play_mode_name(int mode) {
         case 1: return "loop";
         case 2: return "shuffle";
         case 3: return "stop";
+        case 4: return "repeat queue";
         default: return "list";
     }
 }
@@ -283,8 +284,14 @@ void apply_theme(Settings& s, const std::string& theme_name) {
 // =====================================================================
 
 void apply_default_hotkeys(Settings& s) {
-    if (s.hotkeys.empty()) {
-        s.hotkeys = {
+    // Merged per-key (not "only if the whole map is empty") so that a
+    // config.txt which only sets SOME hotkeys -- e.g. an older config
+    // saved before new actions like HKeyConsole/HKeyToggleMute existed,
+    // or one where the user deliberately left a line out/blank -- still
+    // gets sane defaults for whatever it didn't specify, instead of
+    // those actions silently having no key bound at all.
+    {
+        static const std::unordered_map<std::string, std::string> defaults = {
             {"HKeySetting",                     "s"},
             {"HKeyNavigateUp",                  "ARROW_KEY_UP"},
             {"HKeyNavigateDown",                "ARROW_KEY_DOWN"},
@@ -300,15 +307,25 @@ void apply_default_hotkeys(Settings& s) {
             {"HKeyAddHoveringSongToQueue",      "a"},
             {"HKeyRemoveHoveringSongFromQueue", "d"},
             {"HKeySwitchBetweenCards",          "TAB"},
-            {"HKeyToggleRepeat",                "r"},
             {"HKeyTogglePlayPause",             "p"},
-            {"HKeyToggleShuffle",               "m"},
+            {"HKeyCyclePlayMode",               "m"},
             {"HKeyFilterForFolder",             "f"},
             {"HKeyClearFilter",                 "c"},
             {"HKeyQuit",                        "q"},
             {"HKeyResetPreference",             "e"},
             {"HKeyDownloadStream",              "y"},
+            {"HKeyRefreshUi",                   "k"},
+            {"HKeyConsole",                     "t"},
+            {"HKeyToggleMute",                  "x"},
+            {"HKeyCheatsheet",                  "?"},
+            {"HKeyRetryLyrics",                 "l"},
         };
+        for (const auto& [action, key] : defaults) {
+            // Only fill actions that are entirely absent from the config.
+            // A key explicitly set to "" (user unbound it on purpose) is
+            // left alone rather than silently re-bound.
+            if (s.hotkeys.find(action) == s.hotkeys.end()) s.hotkeys[action] = key;
+        }
     }
 }
 
@@ -493,6 +510,7 @@ static Settings load_from_config(const fs::path& path) {
             if (v == "loop") s.play_mode = 1;
             else if (v == "shuffle") s.play_mode = 2;
             else if (v == "stop") s.play_mode = 3;
+            else if (v == "repeat queue") s.play_mode = 4;
             else s.play_mode = 0; // "list" or anything unrecognized
             continue;
         }
@@ -600,8 +618,45 @@ static Settings load_from_config(const fs::path& path) {
         if (key == "visualizer_degradation_speed") { try { s.visualizer_degradation_speed = std::clamp(std::stoi(value), 1, 10); } catch (...) {} continue; }
         if (key == "visualizer_viscosity") { try { s.visualizer_viscosity = std::clamp(std::stoi(value), 0, 10); } catch (...) {} continue; }
         if (key == "theme_name") { s.theme_name = value; continue; }
-        if (key == "play_mode") { try { s.play_mode = std::clamp(std::stoi(value), 0, 3); } catch (...) {} continue; }
+        if (key == "play_mode") { try { s.play_mode = std::clamp(std::stoi(value), 0, 4); } catch (...) {} continue; }
         if (key == "waveform_smooth") { s.waveform_smooth = parse_bool(value); continue; }
+
+        // --- Console logging -------------------------------------------
+        if (key == "ConsoleVerbosity") {
+            std::string v = unquote(value);
+            for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            s.console_verbosity = (v == "verbose") ? 1 : 0;
+            continue;
+        }
+
+        // --- Autosave / session snapshot --------------------------------
+        if (key == "AutoSave") { s.autosave_enabled = parse_bool(value); continue; }
+        if (key == "AutoSaveIndicator") { s.autosave_indicator = parse_bool(value); continue; }
+        if (key == "AutoSaveDelayInSec") { try { s.autosave_delay_sec = std::max(1, std::stoi(value)); } catch (...) {} continue; }
+        if (key == "AutoSaveChr") {
+            // Only one character allowed: keep just the first UTF-8
+            // codepoint of whatever was typed there, not the first byte
+            // (a multi-byte glyph like "•" would otherwise get sliced).
+            std::string v = unquote(value);
+            if (!v.empty()) {
+                unsigned char c0 = static_cast<unsigned char>(v[0]);
+                size_t len = 1;
+                if ((c0 & 0x80) == 0x00) len = 1;
+                else if ((c0 & 0xE0) == 0xC0) len = 2;
+                else if ((c0 & 0xF0) == 0xE0) len = 3;
+                else if ((c0 & 0xF8) == 0xF0) len = 4;
+                s.autosave_chr = v.substr(0, std::min(len, v.size()));
+            }
+            continue;
+        }
+        if (key == "AutoSaveIndicatorType") {
+            std::string v = unquote(value);
+            for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            s.autosave_indicator_type = (v == "color") ? 1 : 0; // "blink" or anything unrecognized
+            continue;
+        }
+        if (key == "AutoSaveC1") { if (!unquote(value).empty()) s.autosave_c1 = normalize_color_value(unquote(value)); continue; }
+        if (key == "AutoSaveC2") { if (!unquote(value).empty()) s.autosave_c2 = normalize_color_value(unquote(value)); continue; }
 
         // --- Local music library paths ---
         // Each LocalMusicPath= line appends one directory.
@@ -674,7 +729,7 @@ static Settings load_from_legacy(const fs::path& path) {
     if (kv.count("waveform_smooth")) s.waveform_smooth = (kv["waveform_smooth"] == "1" || kv["waveform_smooth"] == "true");
 
     s.visualizer_fluidity = std::clamp(s.visualizer_fluidity, 1, 10);
-    s.play_mode = std::clamp(s.play_mode, 0, 3);
+    s.play_mode = std::clamp(s.play_mode, 0, 4);
     return s;
 }
 
@@ -778,7 +833,7 @@ void save_settings(const Settings& s) {
     out << "VisualizerFluidity=" << s.visualizer_fluidity << "\n## 1 to 10\n";
     out << "WaveformStyle=" << (s.waveform_smooth ? "smooth" : "raw") << "\n## raw , smooth\n";
     out << "DiskRotationSpeed=" << s.disk_rotation_speed << "\n## 0.01x to 1.00x\n";
-    out << "PlaybackMode=" << (s.play_mode == 1 ? "loop" : s.play_mode == 2 ? "shuffle" : s.play_mode == 3 ? "stop" : "list") << "\n## list , loop , shuffle , stop\n";
+    out << "PlaybackMode=" << play_mode_name(s.play_mode) << "\n## list , loop , shuffle , stop , repeat queue\n";
     out << "VisualizerDegradationSpeed=" << s.visualizer_degradation_speed << "\n## 1 to 10\n";
     out << "VisualizerViscosity=" << s.visualizer_viscosity << "\n## 1 to 10\n";
     out << "LyricsAlignment=" << (s.lyrics_alignment == 1 ? "left" : s.lyrics_alignment == 2 ? "right" : "center") << "\n## center , left , right\n";
@@ -793,6 +848,27 @@ void save_settings(const Settings& s) {
         out << "## full , word by word , line by line , letter by letter\n";
         out << "## active line only , active word only\n";
     }
+    out << "\n";
+
+    out << "##-------------------------------------------\n";
+    out << "##             CONSOLE / LOGGING\n";
+    out << "##-------------------------------------------\n\n";
+    out << "ConsoleVerbosity=" << (s.console_verbosity == 1 ? "verbose" : "basic") << "\n## basic , verbose\n";
+    out << "## basic   = every command mousiki ran (yt-dlp/ffprobe/ffmpeg/lyrics-fetch) + its raw output\n";
+    out << "## verbose = basic, plus internal/OS-level events (terminal resize, audio device init, spawn errors, ...)\n";
+    out << "## Log file: $HOME/.cache/mousiki/logs/console.log -- wiped fresh at the start of every session.\n";
+    out << "\n";
+
+    out << "##-------------------------------------------\n";
+    out << "##             AUTOSAVE / SESSION SNAPSHOT\n";
+    out << "##-------------------------------------------\n\n";
+    out << "AutoSave=" << tf(s.autosave_enabled) << "\n## resume exact song/position/queue/repeat/shuffle next launch\n";
+    out << "AutoSaveIndicator=" << tf(s.autosave_indicator) << "\n";
+    out << "AutoSaveDelayInSec=" << s.autosave_delay_sec << "\n";
+    out << "AutoSaveChr=" << s.autosave_chr << "\n## exactly one character is used, even if you paste more\n";
+    out << "AutoSaveIndicatorType=" << (s.autosave_indicator_type == 1 ? "color" : "blink") << "\n## blink , color\n";
+    out << "AutoSaveC1=" << s.autosave_c1 << "\n";
+    out << "AutoSaveC2=" << s.autosave_c2 << "\n";
     out << "\n";
 
     out << "##-------------------------------------------\n";
@@ -827,7 +903,7 @@ void save_settings(const Settings& s) {
     // Write every mapped hotkey, stable order, whatever the key is named.
     static const char* hkey_order[] = {
         "HKeyNavigateUp", "HKeyNavigateDown", "HKeyPlay", "HKeyPlayNextSong", "HKeyPlayPreviousSong",
-        "HKeyTogglePlayPause", "HKeyToggleRepeat", "HKeyToggleShuffle", "HKeySearch", "HKeySearchOnline",
+        "HKeyTogglePlayPause", "HKeyCyclePlayMode", "HKeySearch", "HKeySearchOnline",
         "HKeySeekForward", "HKeySeekBackward", "HKeyIncreaseVolume", "HKeyDecreaseVolume",
         "HKeyAddHoveringSongToQueue", "HKeyRemoveHoveringSongFromQueue", "HKeySwitchBetweenCards",
         "HKeyFilterForFolder", "HKeyClearFilter", "HKeyQuit", "HKeyResetPreference", "HKeyDownloadStream",

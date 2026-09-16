@@ -22,7 +22,26 @@ TerminalIO::TerminalIO() {
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
     raw_mode_active_ = true;
-    std::cout << "\x1b[?25l" << std::flush; // hide cursor
+    // Alternate screen buffer: the terminal keeps a second, separate
+    // grid (same dimensions as the visible one) while this is active.
+    // "\x1b[H" homing the cursor and any accidental scroll it causes
+    // both happen *within* that private grid, never touching the user's
+    // actual shell scrollback -- and switching back with "\x1b[?1049l"
+    // on exit restores exactly whatever was on screen before mousiki
+    // started, cleanly, rather than leaving a trail of overwritten
+    // frames behind in their scrollback history.
+    //
+    // To be clear about what this does and doesn't fix: it does NOT by
+    // itself prevent the frame-height-exceeds-terminal-rows scrolling
+    // bug (the alt-screen grid is still exactly term.rows() tall, and
+    // still scrolls internally if you print past its bottom with no
+    // clear) -- that's what term_rows_ and clamp_output_rows() in
+    // app.cpp actually fix. This is a separate, complementary
+    // improvement: even if some future change reintroduces a height
+    // miscalculation, the damage is contained to mousiki's own private
+    // buffer instead of polluting the terminal the person is actually
+    // going to keep using afterwards.
+    std::cout << "\x1b[?1049h" << "\x1b[?25l" << std::flush; // enter alt-screen, hide cursor
 }
 
 TerminalIO::~TerminalIO() { restore(); }
@@ -30,7 +49,7 @@ TerminalIO::~TerminalIO() { restore(); }
 void TerminalIO::restore() {
     if (raw_mode_active_) {
         tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
-        std::cout << "\x1b[?25h" << std::flush;
+        std::cout << "\x1b[?25h" << "\x1b[?1049l" << std::flush; // show cursor, leave alt-screen
         raw_mode_active_ = false;
     }
 }

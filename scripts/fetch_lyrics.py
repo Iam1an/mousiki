@@ -1,8 +1,18 @@
 import json
-import sys
 import os
+import re
 import signal
-import subprocess
+import sys
+
+# lrc.py (same directory) does the actual fetching: Better Lyrics first
+# (word-level TTML, converted to enhanced LRC here in lrc.py itself),
+# falling back to LRCLIB (line-synced only) if Better Lyrics has nothing.
+# This script's only job is to call it and translate the result into the
+# flat JSON object lyrics_fetcher.cpp already knows how to parse --
+# {"ok", "enhanced", "lrc", "source"} on success, {"ok": false, "error",
+# "detail"} on failure -- so nothing on the C++ side had to change to
+# pick up the new source.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def emit(obj):
@@ -10,67 +20,87 @@ def emit(obj):
     sys.exit(0)
 
 
-def load_syncedlyrics():
-    # First: normal Python environment (pip install, or system package).
-    try:
-        import syncedlyrics
-        return syncedlyrics
-    except ImportError:
-        pass
+def _find_pipx_site_packages(package_name):
+    """Best-effort: if `package_name` was installed into an isolated pipx
+    venv rather than a normal pip/pip3 environment, find that venv's
+    site-packages directory so it can be spliced onto sys.path.
 
-    # Second: try pipx environment.
-    #
-    # Use MOUSIKI_PIPX_PATH env var if set (setup.sh resolves the correct
-    # pipx binary and can export it).  Bare "pipx" is a last resort —
-    # under PRoot, PATH can expose the wrong pipx (e.g. /usr/sbin/pipx
-    # instead of the Termux one), which is why setup.sh already does
-    # careful selection.  Passing the resolved path via env avoids
-    # re-doing that discovery here.
-    pipx_bin = os.environ.get("MOUSIKI_PIPX_PATH", "")
+    This mirrors what setup.sh's own pipx detection does at install time
+    -- but doesn't rely on anything setup.sh sets, since setup.sh only
+    ever copies the built binary to somewhere on PATH (no wrapper script,
+    no persistent env export), so there is no path by which an env var
+    it sets could ever reach this script when the running `mousiki`
+    binary later spawns it as a subprocess. This discovers the venv
+    fresh, every call, using whatever `pipx` (or MOUSIKI_PIPX_PATH, kept
+    as an override for any future wrapper that does choose to set it)
+    is available in *this* process's environment/PATH.
+    """
+    import glob
+    import shutil
+    import subprocess as sp
+
+    pipx_bin = os.environ.get("MOUSIKI_PIPX_PATH") or shutil.which("pipx")
     if not pipx_bin:
-        # Fall back to bare PATH lookup (best-effort).
-        import shutil
-        pipx_bin = shutil.which("pipx") or "pipx"
+        return None
 
     try:
-        pipx_home = subprocess.check_output(
+        pipx_home = sp.check_output(
             [pipx_bin, "environment", "--value", "PIPX_HOME"],
-            stderr=subprocess.DEVNULL,
-            text=True,
+            stderr=sp.DEVNULL, text=True,
         ).strip()
 
-        # Don't hardcode $PIPX_HOME/venvs/syncedlyrics — that's a pipx
-        # layout assumption.  Instead, look for any directory whose name
-        # starts with "syncedlyrics" under the venvs dir, and ask its
+        # Don't hardcode $PIPX_HOME/venvs/<package> -- that's a pipx
+        # layout assumption. Instead, look for any directory whose name
+        # starts with the package name under the venvs dir, and ask its
         # venv Python for the real site-packages path.
-        import glob
         venvs_dir = os.path.join(pipx_home, "venvs")
-        candidates = sorted(glob.glob(os.path.join(venvs_dir, "syncedlyrics*")))
+        candidates = sorted(glob.glob(os.path.join(venvs_dir, package_name + "*")))
 
         for venv_dir in candidates:
             venv_python = os.path.join(venv_dir, "bin", "python")
             if not os.path.isfile(venv_python):
                 continue
 
-            site_packages = subprocess.check_output(
-                [
-                    venv_python,
-                    "-c",
-                    "import site; print(site.getsitepackages()[0])",
-                ],
-                stderr=subprocess.DEVNULL,
-                text=True,
+            site_packages = sp.check_output(
+                [venv_python, "-c", "import site; print(site.getsitepackages()[0])"],
+                stderr=sp.DEVNULL, text=True,
             ).strip()
 
             if site_packages and os.path.isdir(site_packages):
-                sys.path.insert(0, site_packages)
-                break
+                return site_packages
 
-        import syncedlyrics
-        return syncedlyrics
+    except (OSError, sp.SubprocessError):
+        pass
 
-    except (ImportError, OSError, subprocess.SubprocessError):
-        return None
+    return None
+
+
+def load_lrc_module():
+    # First: normal Python environment -- pip/pip3 install (regular or
+    # --user), a system package, or `requests` already importable for any
+    # other reason. lrc.py itself does `import requests` at module load
+    # time, so this fails with ImportError exactly when requests isn't
+    # reachable, same as trying to import requests directly would.
+    try:
+        import lrc
+        return lrc
+    except ImportError:
+        pass
+
+    # Second: requests might be sitting in an isolated pipx venv (e.g.
+    # `pipx install requests`, which setup.sh offers as one of its three
+    # install options) rather than on the normal import path. Find it and
+    # splice its site-packages onto sys.path, then retry the import.
+    site_packages = _find_pipx_site_packages("requests")
+    if site_packages:
+        sys.path.insert(0, site_packages)
+        try:
+            import lrc
+            return lrc
+        except ImportError:
+            pass
+
+    return None
 
 
 def has_word_timestamps(lrc_text):
@@ -78,9 +108,6 @@ def has_word_timestamps(lrc_text):
     if not lrc_text:
         return False
     for line in lrc_text.split("\n"):
-        # A line-level timestamp looks like [mm:ss.xx], word-level looks
-        # like <mm:ss.xx> *inside* the line content (after the [mm:ss.xx]).
-        # We only need one line with a word timestamp to confirm enhanced.
         bracket_end = line.find("]")
         if bracket_end < 0:
             continue
@@ -90,14 +117,13 @@ def has_word_timestamps(lrc_text):
     return False
 
 
-import re
-
 def clean_youtube_title(text):
     if '|' in text:
         text = text.split('|')[0]
     text = re.sub(r'\(.*?\)', '', text)
     text = re.sub(r'\[.*?\]', '', text)
     return text.strip()
+
 
 def main():
     if len(sys.argv) < 2:
@@ -110,76 +136,73 @@ def main():
     raw_title = sys.argv[1]
     title = clean_youtube_title(raw_title)
     artist = sys.argv[2] if len(sys.argv) > 2 else ""
-    query = f"{title} {artist}".strip()
 
-    syncedlyrics = load_syncedlyrics()
-
-    if syncedlyrics is None:
+    lrc = load_lrc_module()
+    if lrc is None:
         emit({
             "ok": False,
             "error": "MODULE_MISSING",
-            "detail": "syncedlyrics is not available"
+            "detail": "the 'requests' package is not available (pip install requests)"
         })
 
-    # Hard 25-second alarm: if everything hangs, we still return *something*
-    # to the C++ caller so it doesn't wait forever.
+    # Hard 35-second alarm: two sources (Better Lyrics, then LRCLIB), each
+    # with its own 10s network timeout inside lrc.py, times up to two
+    # attempts (original query, then swapped title/artist below) -- worst
+    # case that's up to ~40s of genuine network waiting. The alarm is a
+    # last-resort backstop so a truly wedged call still returns *something*
+    # to the C++ caller instead of hanging the lyrics fetch forever.
     try:
-        signal.alarm(25)
+        signal.alarm(35)
     except (AttributeError, OSError):
-        pass  # Windows or restricted env — no alarm, best-effort
+        pass  # Windows or restricted env -- no alarm, best-effort
 
-    def do_search(q):
-        return syncedlyrics.search(
-            q,
-            enhanced=True,
-            synced_only=True,
-            providers=["Musixmatch", "Lrclib", "NetEase", "Megalobiz"],
-        )
+    def do_fetch(song, performer):
+        return lrc.get_lyrics(song, performer)
 
-    lrc = None
+    result = None
     last_error = None
-    
+
     try:
-        lrc = do_search(query)
+        result = do_fetch(title, artist)
     except Exception as e:
         last_error = str(e)
 
-    # Retry with swapped Title/Artist if it failed and we have a "-" (common in YouTube)
-    if not lrc and "-" in title and not artist:
+    # Retry with swapped Title/Artist if it failed and the title looks
+    # like a YouTube-style "Artist - Title" string with no artist tag of
+    # its own -- same heuristic the old syncedlyrics-backed version used.
+    if result is None and "-" in title and not artist:
         parts = [p.strip() for p in title.split("-", 1)]
         if len(parts) == 2 and parts[0] and parts[1]:
-            swapped_query = f"{parts[1]} {parts[0]}"
             try:
-                lrc = do_search(swapped_query)
+                result = do_fetch(parts[1], parts[0])
             except Exception as e:
                 last_error = str(e)
 
-    if not lrc:
-        if last_error:
-            emit({
-                "ok": False,
-                "error": "EXCEPTION",
-                "detail": last_error
-            })
-        else:
-            emit({
-                "ok": False,
-                "error": "NOT_FOUND",
-                "detail": f"no lyrics found for: {query}"
-            })
+    if result is None:
+        detail = last_error or f"no lyrics found for: {title} {artist}".strip()
+        error = "EXCEPTION" if last_error else "NOT_FOUND"
+        emit({"ok": False, "error": error, "detail": detail})
 
-    # Detect whether the returned LRC actually has word-level timestamps,
-    # rather than trusting the `enhanced` flag we passed in.  The library
-    # sets enhanced on the Musixmatch *request*, but if Musixmatch's
-    # word-by-word endpoint fails it silently falls back to line-synced,
-    # and other providers never return enhanced lyrics at all.
-    actually_enhanced = has_word_timestamps(lrc)
+    # lrc.py hands back {"source", "ttml", "lrc", "enhanced_lrc"}. Prefer
+    # the word-level enhanced LRC (only Better Lyrics provides one); fall
+    # back to the plain line-synced LRC (LRCLIB, or Better Lyrics if its
+    # TTML somehow had no per-word spans). Re-checking for actual "<...>"
+    # timestamps rather than trusting which field was non-empty mirrors
+    # the same "don't trust the flag, check the text" caution the old
+    # script applied to syncedlyrics' `enhanced` request flag.
+    lrc_text = result.get("enhanced_lrc") or result.get("lrc") or ""
+    if not lrc_text:
+        emit({
+            "ok": False,
+            "error": "NOT_FOUND",
+            "detail": f"no lyrics found for: {title} {artist}".strip()
+        })
 
     emit({
         "ok": True,
-        "enhanced": actually_enhanced,
-        "lrc": lrc,
-        "source": "syncedlyrics"
+        "enhanced": has_word_timestamps(lrc_text),
+        "lrc": lrc_text,
+        "source": result.get("source", "lrc.py"),
     })
 
 

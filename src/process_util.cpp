@@ -1,4 +1,5 @@
 #include "process_util.h"
+#include "console_log.h"
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -82,6 +83,11 @@ ProcResult run_capture(const std::string& cmd, bool merge_stderr) {
     if (rc != 0) {
         close(out_pipe[0]);
         result.exit_code = -1;
+        // Every subprocess mousiki runs goes through here, so this is
+        // the single point that can log "==> cmd" + whatever the OS
+        // actually told us about why it didn't run at all (posix_spawnp
+        // returns the errno value directly, it doesn't set errno).
+        ConsoleLog::instance().log_command(cmd, std::string("spawn failed: ") + std::strerror(rc), result.exit_code);
         return result;
     }
 
@@ -100,6 +106,7 @@ ProcResult run_capture(const std::string& cmd, bool merge_stderr) {
     } else {
         result.exit_code = -1;
     }
+    ConsoleLog::instance().log_command(cmd, result.out, result.exit_code);
     return result;
 }
 

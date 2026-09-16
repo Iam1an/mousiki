@@ -121,7 +121,22 @@ struct Settings {
 
     // --- playback ------------------------------------------------------
     bool waveform_smooth = true;
-    int play_mode = 0; // 0=list 1=loop 2=shuffle 3=stop
+    int play_mode = 0; // 0=list 1=loop(repeat) 2=shuffle 3=stop 4=repeat queue
+
+    // --- console logging (config.txt: ConsoleVerbosity) -----------------
+    // "basic" = every external command mousiki ran (yt-dlp/ffprobe/
+    // ffmpeg/lyrics-fetch) + raw output. "verbose" = that, plus internal/
+    // OS-level events (resizes, audio device init, spawn failures, ...).
+    int console_verbosity = 0; // 0=basic, 1=verbose
+
+    // --- autosave / session snapshot (config.txt: AutoSave*) -----------
+    bool autosave_enabled = true;
+    bool autosave_indicator = true;
+    int autosave_delay_sec = 30;
+    std::string autosave_chr = "\u2022"; // single glyph -- only the first UTF-8 character of the config value is kept
+    int autosave_indicator_type = 0;     // 0=blink (appear/disappear), 1=color (heartbeat C1->C2->C1)
+    std::string autosave_c1;             // empty = falls back to border_color
+    std::string autosave_c2;             // empty = falls back to visualizer_color
 
     std::string theme_name = "default";
 

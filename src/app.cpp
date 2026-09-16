@@ -1,4 +1,5 @@
 #include "app.h"
+#include "console_log.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <thread>
 #include <unistd.h>
+#include <sys/utsname.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
@@ -405,6 +407,26 @@ std::string App::resolve_hotkey_action(int key) const {
     return "";
 }
 
+std::string App::hotkey_conflict(const std::string& key_str, const std::string& except_action) const {
+    if (key_str.empty()) return "";
+    for (const auto& [action, val] : settings_.hotkeys) {
+        if (action == except_action) continue;
+        if (val == key_str) return action;
+    }
+    return "";
+}
+
+// Pushes a message into both the one-line status area (existing
+// behavior) and the persistent console log (both the in-memory buffer
+// the Console overlay reads and, via ConsoleLog, the on-disk
+// console.log) -- so events are still visible after they've scrolled
+// off the status line, after a terminal-session switch redraw wiped
+// the screen, or after the session itself has ended.
+void App::log_event(const std::string& msg) {
+    status_line_ = msg;
+    ConsoleLog::instance().log_basic(msg);
+}
+
 // ---------------------------------------------------------------------
 // Search / list state
 // ---------------------------------------------------------------------
@@ -490,6 +512,17 @@ void App::apply_local_sort(std::vector<LocalTrack>& tracks) const {
 
 void App::refresh_local_view() {
     local_view_ = filter_and_rank_local(last_local_query_);
+    // Folder filter (HKeyFilterForFolder) stacks on top of the search/sort
+    // result rather than replacing it, so filtering-by-folder while a
+    // search is active narrows to just that folder's matches.
+    if (!folder_filter_.empty()) {
+        std::vector<LocalTrack> filtered;
+        filtered.reserve(local_view_.size());
+        for (auto& t : local_view_) {
+            if (t.path.parent_path().string() == folder_filter_) filtered.push_back(t);
+        }
+        local_view_ = std::move(filtered);
+    }
     selected_ = 0;
     scroll_ = 0;
 }
@@ -600,6 +633,8 @@ void App::launch_load_async(fs::path local_path, std::string title, std::string 
         pl.title = title;
         pl.artist = artist;
         pl.location_label = location_label;
+        pl.is_local = is_local;
+        pl.video_id = video_id;
 
         double t_resolve = 0.0, t_probe = 0.0;
 
@@ -738,6 +773,8 @@ void App::poll_pending_load() {
     total_sec_ = pl.total_sec;
     metadata_ = pl.metadata;
     current_path_ = pl.path;
+    current_is_local_ = pl.is_local;
+    current_video_id_ = pl.video_id;
     has_track_ = true;
     player_.clear_finished(); // see clear_finished()'s comment — closes the race that caused the double-skip bug
     waveform_envelope_.clear();
@@ -778,10 +815,19 @@ void App::launch_device_play_async() {
     int my_gen = ++device_gen_;
     auto pcm = current_pcm_;
     int vol = player_.volume() > 0 ? player_.volume() : 70;
-    device_thread_ = std::thread([this, pcm, vol, my_gen]() {
+    // One-shot resume position from a restored snapshot -- consumed
+    // here exactly once, then zeroed so every subsequent track change
+    // (skip, search-and-play, queue advance, ...) starts at 0 like
+    // always. Reading+clearing it up front (still on the main thread,
+    // before the lambda captures it by value) avoids any race with a
+    // second restore attempt -- there isn't one, but this keeps that
+    // invariant obvious rather than implicit.
+    double start_sec = resume_start_sec_;
+    resume_start_sec_ = 0.0;
+    device_thread_ = std::thread([this, pcm, vol, my_gen, start_sec]() {
         std::lock_guard<std::mutex> lk(device_mutex_);
         if (my_gen != device_gen_.load()) return; // superseded — a newer play request won
-        player_.play(pcm, 0.0, vol, &fft_);
+        player_.play(pcm, start_sec, vol, &fft_);
     });
 }
 
@@ -835,11 +881,35 @@ void App::play_selected() {
     else start_online_track(online_view_[selected_]);
 }
 
+int App::current_track_list_index() const {
+    if (!has_track_) return -1;
+    if (list_source_ == ListSource::Local) {
+        if (!current_is_local_) return -1; // playing an online track while browsing the local list
+        for (size_t i = 0; i < local_view_.size(); ++i) {
+            if (local_view_[i].path == current_path_) return static_cast<int>(i);
+        }
+        return -1;
+    } else {
+        if (current_is_local_) return -1; // playing a local track while browsing online results
+        for (size_t i = 0; i < online_view_.size(); ++i) {
+            if (online_view_[i].video_id == current_video_id_) return static_cast<int>(i);
+        }
+        return -1;
+    }
+}
+
 void App::play_relative(int delta) {
     size_t list_len = (list_source_ == ListSource::Local) ? local_view_.size() : online_view_.size();
     if (list_len == 0) return;
-    selected_ = std::clamp(selected_ + delta, 0, static_cast<int>(list_len) - 1);
-    if (selected_ >= scroll_ + kListVisibleRows) scroll_ = selected_ - kListVisibleRows + 1;
+    // Relative to what's actually *playing*, not wherever the hover
+    // cursor happens to be sitting -- falls back to the hover cursor
+    // only when there's no sensible "current" position in this list
+    // (nothing playing yet, or what's playing is from a different
+    // source/isn't in this view at all).
+    int base = current_track_list_index();
+    if (base < 0) base = selected_;
+    selected_ = std::clamp(base + delta, 0, static_cast<int>(list_len) - 1);
+    if (selected_ >= scroll_ + list_visible_rows_) scroll_ = selected_ - list_visible_rows_ + 1;
     if (selected_ < scroll_) scroll_ = selected_;
     play_selected();
 }
@@ -850,48 +920,93 @@ void App::play_relative_random() {
     if (list_len == 1) { selected_ = 0; play_selected(); return; }
     static std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<int> dist(0, static_cast<int>(list_len) - 1);
+    int base = current_track_list_index();
+    if (base < 0) base = selected_;
     int next;
-    do { next = dist(rng); } while (next == selected_);
+    do { next = dist(rng); } while (next == base);
     selected_ = next;
-    if (selected_ >= scroll_ + kListVisibleRows) scroll_ = selected_ - kListVisibleRows + 1;
+    if (selected_ >= scroll_ + list_visible_rows_) scroll_ = selected_ - list_visible_rows_ + 1;
     if (selected_ < scroll_) scroll_ = selected_;
     play_selected();
+}
+
+void App::play_next_from_queue() {
+    // Shuffle: pick a random queue item instead of strictly FIFO order.
+    // Repeat Queue: rotate the played item to the back instead of
+    // discarding it, so the whole queue loops indefinitely rather than
+    // draining to empty. Both apply here (not just to library playback)
+    // -- this is exactly the "queue mode won't respect shuffle or
+    // repeat" bug: previously advance_track()'s queue branch always did
+    // plain FIFO regardless of play_mode.
+    int idx = 0;
+    if (settings_.play_mode == 2 /*shuffle*/ && queue_.size() > 1) {
+        static std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<int> dist(0, static_cast<int>(queue_.size()) - 1);
+        idx = dist(rng);
+    }
+    QueueItem item = queue_[idx];
+    queue_.erase(queue_.begin() + idx);
+    if (settings_.play_mode == 4 /*repeat queue*/) {
+        queue_.push_back(item); // rotate to the back instead of discarding -- keeps the queue looping
+    }
+    if (queue_selected_ >= idx && queue_selected_ > 0) --queue_selected_; // index shifted down by the erase
+    clamp_queue_selected();
+    if (item.is_local) {
+        LocalTrack t{fs::path(item.local_path).stem().string(), item.local_path, item.artist};
+        start_local_track(t);
+    } else {
+        OnlineResult r{item.video_id, item.title, item.artist};
+        start_online_track(r);
+    }
 }
 
 void App::advance_track() {
     has_track_ = false;
 
-    // The queue always takes priority over play_mode — it's an explicit
-    // user-built-up-next list.
+    // Repeat: keep replaying whatever just finished -- whether it came
+    // from the queue or the library -- without touching the queue or
+    // advancing through any list at all. Stop: don't auto-advance into
+    // anything, queue or not. Both apply uniformly regardless of the
+    // queue's state now -- previously these were only ever consulted
+    // once the queue was already empty, which was the other half of the
+    // "queue mode won't respect repeat" bug.
+    if (settings_.play_mode == 1 /*loop*/) {
+        launch_device_play_async(); // same track, already fully decoded, no reload needed
+        has_track_ = true;
+        player_.clear_finished();
+        return;
+    }
+    if (settings_.play_mode == 3 /*stop*/) {
+        return; // leave has_track_ false, no auto-advance -- queue or not
+    }
+
+    // The queue always takes priority over the library — it's an
+    // explicit user-built-up-next list.
     if (!queue_.empty()) {
-        QueueItem item = queue_.front();
-        queue_.erase(queue_.begin());
-        if (queue_selected_ > 0) --queue_selected_; // indices shifted down by the erase
-        clamp_queue_selected();
-        if (item.is_local) {
-            LocalTrack t{fs::path(item.local_path).stem().string(), item.local_path, item.artist};
-            start_local_track(t);
-        } else {
-            OnlineResult r{item.video_id, item.title, item.artist};
-            start_online_track(r);
-        }
+        play_next_from_queue();
         return;
     }
 
     switch (settings_.play_mode) {
-        case 1: // loop — same track, already fully decoded, no reload needed
-            launch_device_play_async();
-            has_track_ = true;
-            player_.clear_finished();
-            break;
         case 2: // shuffle
             play_relative_random();
             break;
-        case 3: // stop
-            break; // leave has_track_ false, no auto-advance
-        default: // list (sequential)
+        default: // list (sequential) -- also where Repeat Queue (4) lands
+                 // once the queue's actually empty; there's nothing left
+                 // to "repeat queue" without one, so it just falls back
+                 // to normal sequential playback.
             play_relative(1);
             break;
+    }
+}
+
+char App::play_mode_letter() const {
+    switch (settings_.play_mode) {
+        case 1: return 'R';  // repeat (loop current track)
+        case 2: return 'S';  // shuffle
+        case 3: return 'O';  // stop (play, then stop -- not "S", shuffle already owns that)
+        case 4: return 'Q';  // repeat queue
+        default: return 'L'; // list (normal sequential)
     }
 }
 
@@ -916,7 +1031,7 @@ void App::queue_remove_last() {
 void App::clamp_queue_selected() {
     if (queue_.empty()) { queue_selected_ = 0; queue_scroll_ = 0; return; }
     queue_selected_ = std::clamp(queue_selected_, 0, static_cast<int>(queue_.size()) - 1);
-    if (queue_selected_ >= queue_scroll_ + kListVisibleRows) queue_scroll_ = queue_selected_ - kListVisibleRows + 1;
+    if (queue_selected_ >= queue_scroll_ + list_visible_rows_) queue_scroll_ = queue_selected_ - list_visible_rows_ + 1;
     if (queue_selected_ < queue_scroll_) queue_scroll_ = queue_selected_;
 }
 
@@ -935,16 +1050,205 @@ void App::queue_move_hovering(int dir) {
     clamp_queue_selected();
 }
 
+// ---------------------------------------------------------------------
+// Autosave / session snapshot
+// ---------------------------------------------------------------------
+
+SnapshotData App::build_snapshot() const {
+    SnapshotData snap;
+    snap.play_mode = settings_.play_mode;
+    snap.muted = muted_;
+    // Save the *real* volume, not the forced-0 muted value, so unmuting
+    // next session restores to what it actually was, not silence.
+    snap.volume = muted_ ? pre_mute_volume_ : player_.volume();
+
+    if (has_track_) {
+        snap.has_now_playing = true;
+        snap.now_playing.is_local = current_is_local_;
+        snap.now_playing.path = current_is_local_ ? current_path_.string() : std::string();
+        snap.now_playing.video_id = current_is_local_ ? std::string() : current_video_id_;
+        snap.now_playing.title = metadata_.name;
+        snap.now_playing.artist = metadata_.artist;
+        snap.position_sec = player_.poll_elapsed();
+    }
+
+    for (const auto& item : queue_) {
+        SnapshotTrack t;
+        t.is_local = item.is_local;
+        t.path = item.is_local ? item.local_path.string() : std::string();
+        t.video_id = item.is_local ? std::string() : item.video_id;
+        t.title = item.title;
+        t.artist = item.artist;
+        snap.queue.push_back(std::move(t));
+    }
+    return snap;
+}
+
+void App::restore_snapshot(const SnapshotData& snap) {
+    settings_.play_mode = std::clamp(snap.play_mode, 0, 4);
+    // Apply the saved volume first, then re-apply mute on top of it --
+    // mirrors what pressing 'x' does at runtime (force 0, remember the
+    // real value), just seeded from the snapshot instead of live state.
+    pre_mute_volume_ = std::clamp(snap.volume, 0, 100);
+    player_.set_volume(pre_mute_volume_);
+    if (snap.muted) {
+        player_.set_volume(0);
+        muted_ = true;
+    }
+
+    queue_.clear();
+    for (const auto& t : snap.queue) {
+        queue_.push_back({t.is_local, t.title, t.artist, t.is_local ? fs::path(t.path) : fs::path(), t.video_id});
+    }
+    clamp_queue_selected();
+
+    if (snap.has_now_playing) {
+        resume_start_sec_ = std::max(0.0, snap.position_sec);
+        if (snap.now_playing.is_local) {
+            fs::path p(snap.now_playing.path);
+            std::error_code ec;
+            if (fs::exists(p, ec)) {
+                LocalTrack t{p.stem().string(), p, snap.now_playing.artist};
+                start_local_track(t);
+                log_event("resuming: " + t.title);
+            } else {
+                resume_start_sec_ = 0.0; // file's gone -- nothing to resume into
+            }
+        } else if (!snap.now_playing.video_id.empty()) {
+            OnlineResult r{snap.now_playing.video_id, snap.now_playing.title, snap.now_playing.artist};
+            start_online_track(r);
+        } else {
+            resume_start_sec_ = 0.0;
+        }
+    }
+}
+
+void App::maybe_autosave() {
+    if (!settings_.autosave_enabled) return;
+    double delay = std::max(1, settings_.autosave_delay_sec);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_autosave_at_).count();
+    if (elapsed < delay) return;
+
+    last_autosave_at_ = std::chrono::steady_clock::now();
+    save_snapshot(build_snapshot());
+    autosave_pulse_active_ = true;
+    autosave_pulse_started_at_ = last_autosave_at_;
+    ConsoleLog::instance().log_basic("autosaved session snapshot");
+}
+
+std::string App::autosave_indicator_glyph() const {
+    if (!settings_.autosave_enabled || !settings_.autosave_indicator) return "";
+
+    double t = autosave_pulse_active_
+             ? std::chrono::duration<double>(std::chrono::steady_clock::now() - autosave_pulse_started_at_).count()
+             : kAutosavePulseSeconds + 1.0; // idle -- well past the pulse window
+
+    std::string glyph = settings_.autosave_chr.empty() ? "\u2022" : settings_.autosave_chr;
+
+    if (settings_.autosave_indicator_type == 0) {
+        // blink: appear/disappear twice (4 half-cycles) right after a
+        // save, then settle back to hidden until the next one.
+        if (t >= kAutosavePulseSeconds) return ""; // idle: hidden between saves
+        int half_cycle = static_cast<int>(t / (kAutosavePulseSeconds / 4.0));
+        bool visible = (half_cycle % 2) == 0;
+        return visible ? glyph : " ";
+    }
+
+    // color: always visible, pulses C1 -> C2 -> C1 (heartbeat) right
+    // after a save, then settles to a steady C1.
+    std::string c1 = ansi_for(settings_.autosave_c1.empty() ? settings_.border_color : settings_.autosave_c1, false);
+    std::string c2 = ansi_for(settings_.autosave_c2.empty() ? settings_.visualizer_color : settings_.autosave_c2, false);
+    if (t >= kAutosavePulseSeconds) return c1 + glyph + "\x1b[0m"; // idle: steady C1
+    // Two full heartbeats across the pulse window: C1->C2->C1->C2->C1.
+    double phase = std::fmod(t, kAutosavePulseSeconds / 2.0) / (kAutosavePulseSeconds / 2.0); // 0..1 within each half-beat
+    bool towards_c2 = phase < 0.5;
+    return (towards_c2 ? c2 : c1) + glyph + "\x1b[0m";
+}
+
+// ---------------------------------------------------------------------
+// Bulk add (paste a YouTube playlist link while Queue is focused)
+// ---------------------------------------------------------------------
+
+void App::launch_bulk_add_async(const std::string& url) {
+    if (bulk_add_thread_.joinable()) bulk_add_thread_.join();
+    bulk_add_in_progress_ = true;
+    bulk_add_ready_ = false;
+    bulk_add_thread_ = std::thread([this, url]() {
+        BulkAddResult res;
+        res.items = online_.list_playlist(url, &res.error);
+        res.success = res.error.empty() && !res.items.empty();
+        std::lock_guard<std::mutex> lk(bulk_add_mutex_);
+        pending_bulk_add_ = std::move(res);
+        bulk_add_ready_ = true;
+    });
+}
+
+void App::poll_pending_bulk_add() {
+    if (!bulk_add_ready_.load()) return;
+    BulkAddResult res;
+    {
+        std::lock_guard<std::mutex> lk(bulk_add_mutex_);
+        if (!bulk_add_ready_.load()) return;
+        res = std::move(pending_bulk_add_);
+        bulk_add_ready_ = false;
+    }
+    bulk_add_in_progress_ = false;
+    if (bulk_add_thread_.joinable()) bulk_add_thread_.join();
+
+    if (!res.success) {
+        status_line_ = res.error.empty() ? "couldn't load that playlist" : res.error;
+        return; // stay in Mode::BulkAdd, phase 1 -- let the person edit the link and retry
+    }
+
+    // Enter phase 2: show the checklist rather than committing
+    // immediately. Starts fully de-selected -- "SELECT" is meant for
+    // picking your own favorites out of the playlist, so nothing is
+    // pre-starred; "ALL" (the "a" key) still adds every fetched track
+    // regardless of star state, unaffected by this default.
+    pending_bulk_add_ = std::move(res);
+    bulk_add_selected_.assign(pending_bulk_add_.items.size(), false);
+    bulk_add_cursor_ = 0;
+    bulk_add_scroll_ = 0;
+    bulk_add_results_ready_ = true;
+    status_line_.clear();
+}
+
+void App::commit_bulk_add(bool all) {
+    int added = 0;
+    for (size_t i = 0; i < pending_bulk_add_.items.size(); ++i) {
+        if (!all && (i >= bulk_add_selected_.size() || !bulk_add_selected_[i])) continue;
+        const auto& item = pending_bulk_add_.items[i];
+        queue_.push_back({false, item.title, item.uploader, {}, item.video_id});
+        ++added;
+    }
+    clamp_queue_selected();
+    log_event("added " + std::to_string(added) + " track" + (added == 1 ? "" : "s") + " to queue");
+
+    mode_ = Mode::Browse;
+    bulk_add_results_ready_ = false;
+    bulk_add_buffer_.clear();
+    pending_bulk_add_ = BulkAddResult{};
+    bulk_add_selected_.clear();
+    bulk_add_cursor_ = 0;
+    bulk_add_scroll_ = 0;
+}
+
 // Tab layout: 0=Colors, 1=On/Off, 2=Animation, 3=Reference, 4=About App.
 // Reference-tab rows map to specific well-known hotkey action keys in
 // settings_.hotkeys (a plain string->string map already), so they don't
 // need their own struct fields the way Colors/On-Off/Animation do.
 static const char* kRefHotkeyNames[] = {
     "HKeySetting", "HKeyNavigateUp", "HKeyNavigateDown", "HKeyPlay", "HKeyPlayNextSong",
-    "HKeyPlayPreviousSong", "HKeyToggleRepeat", "HKeyToggleShuffle", "HKeySearch",
+    "HKeyPlayPreviousSong", "HKeyCyclePlayMode", "HKeySearch",
     "HKeySearchOnline", "HKeyQuit",
+    // Appended so the newer default hotkeys are editable/rebindable from
+    // the Settings > Reference tab too, not just settable via config.txt.
+    "HKeySeekForward", "HKeySeekBackward", "HKeyIncreaseVolume", "HKeyDecreaseVolume",
+    "HKeyAddHoveringSongToQueue", "HKeyRemoveHoveringSongFromQueue", "HKeySwitchBetweenCards",
+    "HKeyFilterForFolder", "HKeyClearFilter", "HKeyDownloadStream",
+    "HKeyRefreshUi", "HKeyConsole", "HKeyToggleMute", "HKeyCheatsheet", "HKeyRetryLyrics",
 };
-static constexpr int kRefRowCount = 11;
+static constexpr int kRefRowCount = 25;
 
 std::string* App::color_field_ptr(int row, int col) {
     switch (row) {
@@ -981,7 +1285,7 @@ int App::settings_max_row() const {
             return kRefRowCount + letters - 1; // 11 hotkeys + N font-map rows
         }
         case 4: {
-            int MAX_Y = std::max(main_frame_height(80) - 2, 10);
+            int MAX_Y = std::max(term_rows_ - 2, 10);
             int visible = std::max(1, MAX_Y - 3);
             int total = static_cast<int>(settings_.about_app_lines.size());
             return std::max(0, total - visible); // scroll range, not a field cursor
@@ -1016,7 +1320,10 @@ std::string App::settings_get_value(int row, int col) const {
             case 0: return std::to_string(settings_.visualizer_fluidity);
             case 1: return settings_.waveform_smooth ? "smooth" : "raw";
             case 2: return std::to_string(settings_.disk_rotation_speed).substr(0, 4);
-            case 3: return settings_.play_mode == 1 ? "loop" : settings_.play_mode == 2 ? "shuffle" : settings_.play_mode == 3 ? "stop" : "list";
+            case 3: {
+                static const char* names[] = {"list", "loop", "shuffle", "stop", "repeat queue"};
+                return names[std::clamp(settings_.play_mode, 0, 4)];
+            }
             case 4: return std::to_string(settings_.visualizer_degradation_speed);
             case 5: return std::to_string(settings_.visualizer_viscosity);
             case 6: return settings_.lyrics_alignment == 1 ? "left" : settings_.lyrics_alignment == 2 ? "right" : "center";
@@ -1043,7 +1350,7 @@ std::vector<std::string> App::settings_options_for(int tab, int row) const {
             case 0: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
             case 1: return {"raw", "smooth"};
             case 2: return {"0.01", "0.05", "0.10", "0.17", "0.25", "0.50", "0.75", "1.00"};
-            case 3: return {"list", "loop", "shuffle"};
+            case 3: return {"list", "loop", "shuffle", "stop", "repeat queue"};
             case 4: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
             case 5: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
             case 6: return {"left", "center", "right"};
@@ -1083,7 +1390,7 @@ void App::settings_commit_edit() {
             case 0: try { settings_.visualizer_fluidity = std::stoi(buf); } catch (...) {} break;
             case 1: settings_.waveform_smooth = (v == "smooth"); break;
             case 2: try { settings_.disk_rotation_speed = std::stod(buf); } catch (...) {} break;
-            case 3: settings_.play_mode = (v == "loop") ? 1 : (v == "shuffle") ? 2 : (v == "stop") ? 3 : 0; break;
+            case 3: settings_.play_mode = (v == "loop") ? 1 : (v == "shuffle") ? 2 : (v == "stop") ? 3 : (v == "repeat queue") ? 4 : 0; break;
             case 4: try { settings_.visualizer_degradation_speed = std::stoi(buf); } catch (...) {} break;
             case 5: try { settings_.visualizer_viscosity = std::stoi(buf); } catch (...) {} break;
             case 6: settings_.lyrics_alignment = (v == "left") ? 1 : (v == "right") ? 2 : 0; break;
@@ -1123,6 +1430,22 @@ void App::handle_settings_key(int key) {
         if (key == '\r' || key == '\n') {
             std::string key_name = (settings_tab_ == 3 && settings_row_ >= 0 && settings_row_ < kRefRowCount)
                                   ? kRefHotkeyNames[settings_row_] : "";
+            // Hotkey overlap fix: if this is a Reference-tab hotkey being
+            // rebound and the typed key is already owned by a different
+            // action, reject the commit instead of silently creating a
+            // collision where two actions fire on the same key. Clear the
+            // buffer, force a redraw, and stay in ColorEdit mode so the
+            // user can just repeat entry with a different key -- same
+            // flow as a normal edit, just not accepted yet.
+            if (!key_name.empty()) {
+                std::string conflict = hotkey_conflict(color_edit_buffer_, key_name);
+                if (!conflict.empty()) {
+                    status_line_ = "KEY \"" + color_edit_buffer_ + "\" ALREADY USED BY " + conflict + " -- try another key";
+                    color_edit_buffer_.clear();
+                    force_redraw_ = true;
+                    return; // stay in ColorEdit: redraw and repeat
+                }
+            }
             settings_commit_edit();
             status_line_ = key_name.empty() ? "UPDATED" : ("UPDATED " + key_name);
             mode_ = Mode::Settings;
@@ -1200,6 +1523,114 @@ void App::handle_key(int key) {
         return;
     }
 
+    if (mode_ == Mode::Console) {
+        // ESC, or the console hotkey again, closes it. Anything else is
+        // ignored -- this is a read-only log view.
+        if (key == 27 || key == 't' || key == 'T') mode_ = Mode::Browse;
+        return;
+    }
+
+    if (mode_ == Mode::Cheatsheet) {
+        if (key == 27 || key == '?') mode_ = Mode::Browse;
+        return;
+    }
+
+    if (mode_ == Mode::BulkAdd) {
+        if (key == 27) { // cancel entirely -- discard buffer, results, and selection state
+            mode_ = Mode::Browse;
+            status_line_.clear();
+            bulk_add_buffer_.clear();
+            bulk_add_results_ready_ = false;
+            pending_bulk_add_ = BulkAddResult{};
+            bulk_add_selected_.clear();
+            return;
+        }
+
+        if (bulk_add_results_ready_) {
+            // --- Phase 2: navigate/star the fetched checklist. ---
+            int total = static_cast<int>(pending_bulk_add_.items.size());
+            if (key == 'A' && total > 0) { // up
+                bulk_add_cursor_ = std::max(0, bulk_add_cursor_ - 1);
+                if (bulk_add_cursor_ < bulk_add_scroll_) bulk_add_scroll_ = bulk_add_cursor_;
+                return;
+            }
+            if (key == 'B' && total > 0) { // down
+                bulk_add_cursor_ = std::min(total - 1, bulk_add_cursor_ + 1);
+                if (bulk_add_cursor_ >= bulk_add_scroll_ + kBulkAddVisibleRows) bulk_add_scroll_ = bulk_add_cursor_ - kBulkAddVisibleRows + 1;
+                return;
+            }
+            if (key == ' ' && total > 0) { // toggle star on the hovered row
+                if (bulk_add_cursor_ < static_cast<int>(bulk_add_selected_.size())) {
+                    bulk_add_selected_[bulk_add_cursor_] = !bulk_add_selected_[bulk_add_cursor_];
+                }
+                return;
+            }
+            if (key == 'a') { commit_bulk_add(/*all=*/true); return; }        // "ALL"
+            if (key == '\r' || key == '\n') { commit_bulk_add(/*all=*/false); return; } // "[SELECT]"
+            return;
+        }
+
+        // --- Phase 1: typing the link. ---
+        if (key == '\r' || key == '\n') {
+            if (!bulk_add_buffer_.empty() && !bulk_add_in_progress_.load()) {
+                status_line_ = "fetching playlist ...";
+                launch_bulk_add_async(bulk_add_buffer_);
+            }
+            return; // stays open -- poll_pending_bulk_add() moves to phase 2 once the fetch resolves
+        }
+        if (key == 127 || key == 8) { if (!bulk_add_buffer_.empty()) bulk_add_buffer_.pop_back(); return; }
+        if (key >= 32 && key < 127 && bulk_add_buffer_.size() < 200) bulk_add_buffer_ += static_cast<char>(key);
+        return;
+    }
+
+    if (mode_ == Mode::RetryLyrics) {
+        if (key == 27) { mode_ = Mode::Browse; return; } // cancel entirely, nothing submitted
+
+        std::vector<RLField> fields = rl_visible_fields();
+        auto cur_pos = std::find(fields.begin(), fields.end(), rl_focus_);
+        int idx = (cur_pos != fields.end()) ? static_cast<int>(cur_pos - fields.begin()) : 0;
+
+        if (key == 9 || key == 'B') { // Tab / down -- next field
+            idx = (idx + 1) % static_cast<int>(fields.size());
+            rl_focus_ = fields[idx];
+            return;
+        }
+        if (key == 'A') { // up -- previous field
+            idx = (idx - 1 + static_cast<int>(fields.size())) % static_cast<int>(fields.size());
+            rl_focus_ = fields[idx];
+            return;
+        }
+        if (key == '\r' || key == '\n') { rl_submit(); return; } // "enter to fetch", works from any field
+
+        if (bool* b = rl_bool_ptr(rl_focus_)) {
+            if (key == ' ') { // toggle -- checkboxes are the only thing Space does anything to
+                bool new_val = !*b;
+                // Enforce the radio group: turning one of
+                // slowed/ultra-slowed/spedup on clears the other two.
+                // Reverb/remix/other stay independent of this and of
+                // each other.
+                if (rl_focus_ == RLField::TypeSlowed || rl_focus_ == RLField::TypeUltraSlowed || rl_focus_ == RLField::TypeSpedup) {
+                    rl_slowed_ = rl_ultra_slowed_ = rl_spedup_ = false;
+                }
+                *b = new_val;
+                // Turning RemixText/OtherText off (unchecking) drops
+                // them from rl_visible_fields() -- if focus was sitting
+                // on one of those now-hidden text fields, land back on
+                // the checkbox that just hid it instead of a field that
+                // no longer exists in the nav order.
+                return;
+            }
+            return; // typing/backspace do nothing on a checkbox field
+        }
+
+        if (std::string* t = rl_text_ptr(rl_focus_)) {
+            if (key == 127 || key == 8) { if (!t->empty()) t->pop_back(); return; }
+            if (key >= 32 && key < 127 && t->size() < 200) *t += static_cast<char>(key);
+            return;
+        }
+        return;
+    }
+
     if (mode_ == Mode::Search) {
         if (key == 27) {
             // Cancel: put the view back exactly as it was before '/' was
@@ -1256,7 +1687,7 @@ void App::handle_key(int key) {
                 // BUGFIX: selection could move past the visible window without
                 // the window ever following it, leaving the highlighted row
                 // invisible below row 8 instead of the list scrolling up.
-                if (selected_ >= scroll_ + kListVisibleRows) scroll_ = selected_ - kListVisibleRows + 1;
+                if (selected_ >= scroll_ + list_visible_rows_) scroll_ = selected_ - list_visible_rows_ + 1;
             }
             break;
         case 'C': // right = seek forward
@@ -1284,30 +1715,110 @@ void App::handle_key(int key) {
         case '2': // volume down
             if (has_track_) player_.set_volume(std::max(0, player_.volume() - 5));
             break;
-        case 'n': case 'N': // next song (within current list)
-            play_relative(1);
+        case 'n': case 'N': // next -- the queue (if any) takes priority,
+                             // same as auto-advance-on-finish does, and
+                             // respects Shuffle/Repeat Queue via
+                             // play_next_from_queue() (a manual skip
+                             // still always actually skips, though --
+                             // Repeat/Stop only govern *automatic*
+                             // advance, not an explicit "n" press).
+            if (!queue_.empty()) play_next_from_queue();
+            else play_relative(1);
             break;
-        case 'b': // prev song (within current list)
+        case 'b': // prev -- relative to what's actually playing (see
+                  // current_track_list_index()), not the hover cursor.
+                  // No queue equivalent: a FIFO queue has no well-defined
+                  // "previous" once an item's been consumed.
             play_relative(-1);
             break;
-        case 'a': // add selected to queue
-            queue_add_selected();
-            status_line_ = "added to queue";
+        case 'a': // add hovering song to queue (List focus) -- or, when
+                  // the Queue panel itself is focused, "a" has nothing
+                  // hovering-in-the-list to add, so it opens the bulk-add
+                  // panel instead (paste a YouTube playlist link, queue
+                  // everything in it).
+            if (queue_focus_) {
+                mode_ = Mode::BulkAdd;
+                bulk_add_buffer_.clear();
+                bulk_add_results_ready_ = false;
+                pending_bulk_add_ = BulkAddResult{};
+                bulk_add_selected_.clear();
+                bulk_add_cursor_ = 0;
+                bulk_add_scroll_ = 0;
+                status_line_.clear();
+            } else {
+                queue_add_selected();
+                log_event("added to queue");
+            }
             break;
-        case 'd': // remove last queued item
-            queue_remove_last();
-            status_line_ = "removed from queue";
+        case 'd': // remove hovering queue item
+            queue_remove_hovering();
+            log_event("removed from queue");
             break;
-        case 'l': case 'L': // retry lyrics fetch for the current track
+        case 'm': case 'M': // cycle play mode: list -> repeat -> shuffle
+                             // -> repeat queue -> stop -> list -- one key
+                             // for all five instead of a separate toggle
+                             // per mode.
+            settings_.play_mode = (settings_.play_mode + 1) % 5;
+            {
+                // Indexed 0=list,1=repeat,2=shuffle,3=stop,4=repeat queue,
+                // matching play_mode's own numbering (not cycle order).
+                static const char* mode_names[] = {"list", "repeat", "shuffle", "stop", "repeat queue"};
+                log_event(std::string("play mode: ") + mode_names[settings_.play_mode]);
+            }
+            break;
+        case 'k': case 'K': // refresh ui -- force a full redraw, for when a
+                             // resize or terminal-session switch raced the
+                             // render loop and left a torn/stale frame on
+                             // screen. hard_clear is normally only set on a
+                             // detected width or mode change; this forces
+                             // it once unconditionally on the very next
+                             // frame.
+            force_redraw_ = true;
+            log_event("ui refreshed");
+            break;
+        case 't': // console -- overlay showing recent status/log events
+            mode_ = Mode::Console;
+            break;
+        case 'x': case 'X': // mute -- force volume to 0 without touching pause state
+            if (!muted_) {
+                pre_mute_volume_ = player_.volume();
+                player_.set_volume(0);
+                muted_ = true;
+                log_event("muted");
+            } else {
+                player_.set_volume(pre_mute_volume_);
+                muted_ = false;
+                log_event("unmuted");
+            }
+            break;
+        case '?': // cheatsheet overlay
+            mode_ = Mode::Cheatsheet;
+            break;
+        case 'f': case 'F': // filter local list to the hovering track's folder
+            if (list_source_ == ListSource::Local && !local_view_.empty() &&
+                selected_ >= 0 && selected_ < static_cast<int>(local_view_.size())) {
+                folder_filter_ = local_view_[selected_].path.parent_path().string();
+                refresh_local_view();
+                log_event("filtered: " + fs::path(folder_filter_).filename().string());
+            }
+            break;
+        case 'c': // clear folder filter
+            if (!folder_filter_.empty()) {
+                folder_filter_.clear();
+                refresh_local_view();
+                log_event("filter cleared");
+            }
+            break;
+        case 'l': case 'L': // retry lyrics -- opens the manual title/artist override form
             if (has_track_) {
-                launch_lyrics_fetch(metadata_.name, metadata_.artist == "-" ? "" : metadata_.artist, current_path_, /*force_network=*/true);
-                status_line_ = "retrying lyrics ...";
+                rl_open_from_current_track();
+                mode_ = Mode::RetryLyrics;
             }
             break;
         case 'w': case 'W': // toggle waveform style (raw/smooth) directly, without going into Settings
             settings_.waveform_smooth = !settings_.waveform_smooth;
             recompute_waveform_for_current_track();
-            status_line_ = settings_.waveform_smooth ? "waveform: smooth" : "waveform: raw";
+            log_event(settings_.waveform_smooth ? "waveform: smooth" : "waveform: raw");
             break;
         case 'y': case 'Y': // save cached stream to local music path
             if (has_track_) {
@@ -1350,14 +1861,10 @@ void App::handle_key(int key) {
                 }
             }
             break;
-        case 't': // remove the hovering song from the queue
-            queue_remove_hovering();
-            status_line_ = "removed from queue";
-            break;
         case 'T': // cycle local-list sort mode (folder order -> title A-Z -> artist A-Z)
             local_sort_mode_ = (local_sort_mode_ + 1) % 3;
             refresh_local_view();
-            status_line_ = std::string("sort: ") + sort_mode_name(local_sort_mode_);
+            log_event(std::string("sort: ") + sort_mode_name(local_sort_mode_));
             break;
         case '\r': case '\n':
             play_selected();
@@ -1374,16 +1881,9 @@ void App::handle_key(int key) {
                  // online results, scrolled deep into the list).
             list_source_ = ListSource::Local;
             last_local_query_.clear();
+            folder_filter_.clear();
             refresh_local_view();
             status_line_.clear();
-            break;
-        case 'r': case 'R': // force a full redraw -- for when a resize
-                             // raced the render loop and left a torn/
-                             // stale frame on screen. hard_clear is
-                             // normally only set on a detected width or
-                             // mode change; this forces it once
-                             // unconditionally on the very next frame.
-            force_redraw_ = true;
             break;
         case 'q': case 'Q':
             quit_ = true;
@@ -1416,7 +1916,7 @@ void App::handle_key(int key) {
 // entirely, never gating rendering or input.
 void App::ensure_visible_row_meta() {
     if (list_source_ != ListSource::Local) return;
-    for (int i = scroll_; i < std::min<int>(local_view_.size(), scroll_ + kListVisibleRows); ++i) {
+    for (int i = scroll_; i < std::min<int>(local_view_.size(), scroll_ + list_visible_rows_); ++i) {
         const auto& t = local_view_[i];
         std::string key = t.path.string();
         {
@@ -1824,7 +2324,10 @@ std::vector<std::string> App::build_progress_panel(int total_width) const {
 
     std::string border_ansi = ansi_for(settings_.border_color, false);
     std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
-    std::string button_ansi = ansi_for(settings_.button_color, false);
+    // Buttons (<<< PLAY >>>) and the volume bar now match the border
+    // color rather than the separate (and, for these two elements,
+    // effectively unused/inert) button_color field.
+    std::string button_ansi = border_ansi;
 
     auto button_mid = [&](const std::string& text) {
         std::string centered = button_ansi + center_pad(text, button_content_w) + "\x1b[0m";
@@ -1860,14 +2363,44 @@ std::vector<std::string> App::build_progress_panel(int total_width) const {
 
     int vol = player_.volume();
     int vol_hashes = (vol * 20) / 100;
-    std::string vol_bar_text = std::string(vol_hashes, '#') + std::string(20 - vol_hashes, '-');
-    std::string vol_tail = "VOLUME BAR:[" + button_ansi + vol_bar_text + "\x1b[0m" + "] " + std::to_string(vol) + "%";
+    // "#" (filled) matches the waveform's played color, "-" (empty)
+    // matches its unplayed/remaining color -- color_played/color_unplayed
+    // are already computed above from progress_played_color/
+    // progress_remaining_color for the waveform itself, reused here so
+    // the volume bar visually reads as the same kind of fill. The
+    // "VOLUME BAR:[...]" label and brackets use the border color, same
+    // as the buttons above.
+    std::string vol_bar_colored = color_played + std::string(vol_hashes, '#') + "\x1b[0m"
+                                 + color_unplayed + std::string(20 - vol_hashes, '-') + "\x1b[0m";
+    std::string vol_bar_text = std::string(vol_hashes, '#') + std::string(20 - vol_hashes, '-'); // plain, for width math only
+    std::string vol_tail = border_ansi + "VOLUME BAR:[" + "\x1b[0m" + vol_bar_colored
+                          + border_ansi + "]" + "\x1b[0m" + " " + std::to_string(vol) + "%";
     int side_w = total_width - main_total_w;
     // pad_left counts raw bytes, so it can't be used once vol_tail carries
     // ANSI bytes -- pad by the *visible* width instead (the volume-bar
     // color fix below is what introduced the mismatch).
     int visible_w = display_width("VOLUME BAR:[" + vol_bar_text + "] " + std::to_string(vol) + "%");
-    if (side_w > visible_w) vol_tail = std::string(side_w - visible_w, ' ') + vol_tail;
+    int gap = std::max(0, side_w - visible_w);
+
+    if (!settings_.autosave_enabled) {
+        // AutoSave fully off: no indicator, and the blank gap moves to
+        // the *right* of the text instead of sitting between the
+        // border and it -- "│VOLUME BAR" touching the border directly,
+        // same total line width either way so nothing else has to
+        // change to stay aligned.
+        if (gap > 0) vol_tail = vol_tail + std::string(gap, ' ');
+    } else {
+        // AutoSave on: keep the existing gap (│  VOLUME BAR), but let
+        // the indicator glyph occupy the first character of it when
+        // enabled -- │• VOLUME BAR with room to spare, or │•VOLUME BAR
+        // once the gap is down to exactly one column.
+        std::string pad(gap, ' ');
+        if (gap >= 1) {
+            std::string glyph = autosave_indicator_glyph();
+            if (!glyph.empty()) pad = glyph + pad.substr(1);
+        }
+        vol_tail = pad + vol_tail;
+    }
 
     std::string time_plain = "[ " + fmt_mmss(elapsed) + " ]" + settings_.box_horizontal + "[ " + fmt_mmss(static_cast<double>(total_sec_)) + " ]";
     // Manual box-bottom construction (rather than the shared box_bottom()
@@ -1905,7 +2438,13 @@ std::vector<std::string> App::build_search_bar(int total_width) const {
     std::vector<std::string> out;
     int search_w = total_width - 5;
     out.push_back(box_top(label, search_w, border_ansi) + border_ansi + "╭───╮\x1b[0m");
-    out.push_back(box_line(content, search_w, border_ansi) + border_ansi + settings_.box_vertical + " ✦ " + settings_.box_vertical + "\x1b[0m");
+    // Play-mode indicator: L=list, R=repeat, S=shuffle, Q=repeat queue,
+    // O=stop -- one letter for whichever of the five settings_.play_mode
+    // states is active, cycled with a single "m" press
+    // (HKeyCyclePlayMode) rather than a separate toggle per mode.
+    std::string mode_letter(1, play_mode_letter());
+    out.push_back(box_line(content, search_w, border_ansi) + border_ansi + settings_.box_vertical
+                  + " " + mode_letter + " " + settings_.box_vertical + "\x1b[0m");
     out.push_back(box_bottom(search_w, "", border_ansi_bottom) + border_ansi_bottom + "╰───╯\x1b[0m");
     return out;
 }
@@ -2044,20 +2583,16 @@ std::vector<std::string> App::build_queue_panel(int total_width, int height) con
 // Settings panel
 // ---------------------------------------------------------------------
 
-int App::main_frame_height(int w) const {
-    // Same panels, same order, same extra lines as the Browse-mode branch
-    // of render_frame() actually emits -- computed here (not hardcoded)
-    // so the Settings panel's height always tracks the real player view
-    // even as those panels change in the future, rather than drifting
-    // out of sync with a stale magic number.
-    int h = static_cast<int>(build_metadata_panel(w).size());
-    h += static_cast<int>(build_progress_panel(w).size());
-    h += static_cast<int>(build_search_bar(w).size());
-    h += kListVisibleRows;
-    h += 1; // blank separator line
-    h += 1; // status/loading line -- reserved even when currently empty, so this doesn't jitter frame to frame
-    return h;
-}
+// main_frame_height() used to live here -- it estimated the Browse view's
+// total line count (from the fixed kListVisibleRows constant, among
+// other things) so the Settings/Console/Cheatsheet/BulkAdd overlays
+// could size themselves to "roughly the same height as the player
+// view". That was never actually tied to the real terminal size, which
+// is exactly what let all of those overlays overflow a short terminal
+// and scroll-duplicate just like the Browse view did (see term_rows_'s
+// comment in app.h). Every caller now sizes directly off term_rows_
+// (the real, current ioctl-reported row count) instead, so this
+// function no longer has a reason to exist.
 
 void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) const {
     // Literal port of the reference SettingsEngine::render() -- same
@@ -2203,8 +2738,13 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
         // settings_row_, centered) rather than ever growing the panel
         // past player_h.
         static const char* ref_l[kRefRowCount] = {"Open Settings", "Navigate Up", "Navigate Down", "Play / Pause",
-                                                    "Next Track", "Prev Track", "Toggle Repeat", "Toggle Shuffle",
-                                                    "Search Local", "Search Online", "Quit Application"};
+                                                    "Next Track", "Prev Track", "Cycle Play Mode",
+                                                    "Search Local", "Search Online", "Quit Application",
+                                                    "Seek Forward", "Seek Backward", "Volume Up", "Volume Down",
+                                                    "Add To Queue", "Remove From Queue", "Switch Cards",
+                                                    "Filter By Folder", "Clear Filter", "Download Stream",
+                                                    "Refresh UI", "Console / Logs", "Toggle Mute", "Cheatsheet",
+                                                    "Retry Lyrics"};
         std::vector<char> letters;
         for (char c = 'A'; c <= 'Z'; ++c) if (settings_.font_map.count(c)) letters.push_back(c);
         int display_count = kRefRowCount + 1 + static_cast<int>(letters.size()); // +1 for the divider row
@@ -2278,10 +2818,445 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
             frame << "\x1b[" << cy << ";" << (cx + static_cast<int>(color_edit_buffer_.size())) << "H\x1b[?25h";
         } else {
             int cy = 3 + settings_row_;
+            if (settings_tab_ == 3) {
+                // Reference tab scrolls once its row list exceeds the
+                // visible window -- now the common case, since it holds
+                // 26 hotkey rows plus any font-map rows. Recompute the
+                // same scroll offset used when rendering (see the
+                // settings_tab_==3 branch above) so the text cursor
+                // lands on the row actually drawn there instead of one
+                // that's already scrolled off-screen.
+                int visible = std::max(1, MAX_Y - 3);
+                auto to_display_row = [](int selectable_row) {
+                    return (selectable_row < kRefRowCount) ? selectable_row : selectable_row + 1;
+                };
+                int cur_display = to_display_row(settings_row_);
+                std::vector<char> letters;
+                for (char c = 'A'; c <= 'Z'; ++c) if (settings_.font_map.count(c)) letters.push_back(c);
+                int display_count = kRefRowCount + 1 + static_cast<int>(letters.size());
+                int scroll = std::clamp(cur_display - visible / 2, 0, std::max(0, display_count - visible));
+                cy = 3 + (cur_display - scroll);
+            }
             frame << "\x1b[" << cy << ";" << (35 + static_cast<int>(color_edit_buffer_.size())) << "H\x1b[?25h";
         }
     }
 }
+// ---------------------------------------------------------------------
+// Console / log overlay (HKeyConsole)
+// ---------------------------------------------------------------------
+
+void App::build_console_screen(std::ostringstream& frame, int W, int target_height) const {
+    std::string border = ansi_for(settings_.border_color, false);
+    frame << box_top("CONSOLE / LOGS", W, border) << "\n";
+
+    std::vector<std::string> log_lines = ConsoleLog::instance().lines();
+    // Must always equal the player view's own height (target_height,
+    // computed by player_view_height() -- see its comment in app.h),
+    // never just "whatever the terminal happens to fit". A terminal much
+    // taller than the actual Browse-mode view would otherwise leave this
+    // overlay awkwardly mismatched from the view it's standing in for.
+    int visible = std::max(1, target_height - 2); // minus this overlay's own top/bottom border rows
+    int total = static_cast<int>(log_lines.size());
+    int start = std::max(0, total - visible); // always shows the tail, newest at the bottom
+
+    for (int r = 0; r < visible; ++r) {
+        int idx = start + r;
+        std::string line = (idx < total) ? log_lines[idx] : "";
+        frame << box_line(line, W, border) << "\n";
+    }
+    frame << box_bottom(W, "[t / ESC] close", border) << "\n";
+}
+
+// ---------------------------------------------------------------------
+// Cheatsheet overlay (HKeyCheatsheet)
+// ---------------------------------------------------------------------
+
+void App::build_cheatsheet_screen(std::ostringstream& frame, int W) const {
+    std::string border = ansi_for(settings_.border_color, false);
+    frame << box_top("CHEATSHEET", W, border) << "\n";
+
+    // action, human-readable description -- key shown is whatever the
+    // user actually has bound (config.txt / rebound in Settings), not a
+    // hardcoded assumption, so this stays accurate after remapping.
+    static const std::pair<const char*, const char*> rows[] = {
+        {"HKeySearch",                      "Search local folder"},
+        {"HKeySearchOnline",                "Search online (YouTube)"},
+        {"HKeyDownloadStream",              "Download stream to 1st local path"},
+        {"HKeyTogglePlayPause",             "Play / pause"},
+        {"HKeyPlayNextSong",                "Play next in list/queue"},
+        {"HKeyPlayPreviousSong",            "Play previous in list"},
+        {"HKeySeekForward",                 "Seek forward 5s"},
+        {"HKeySeekBackward",                "Seek backward 5s"},
+        {"HKeyIncreaseVolume",              "Volume up"},
+        {"HKeyDecreaseVolume",              "Volume down"},
+        {"HKeyCyclePlayMode",               "Cycle play mode (list/repeat/shuffle/repeat queue/stop)"},
+        {"HKeyRefreshUi",                   "Refresh UI (redraw)"},
+        {"HKeyConsole",                     "Console / logs"},
+        {"HKeySwitchBetweenCards",          "Switch between panels"},
+        {"HKeyAddHoveringSongToQueue",      "Add hovering track to queue"},
+        {"HKeyRemoveHoveringSongFromQueue", "Remove hovering track from queue"},
+        {"HKeyFilterForFolder",             "Filter by folder"},
+        {"HKeyClearFilter",                 "Clear filter"},
+        {"HKeyQuit",                        "Quit"},
+        {"HKeySetting",                     "Settings panel"},
+        {"HKeyNavigateUp",                  "Explore list (up)"},
+        {"HKeyNavigateDown",                "Explore list (down)"},
+        {"HKeyToggleMute",                  "Mute (without pausing)"},
+        {"HKeyCheatsheet",                  "This cheatsheet"},
+        {"HKeyRetryLyrics",                 "Retry lyrics"},
+    };
+
+    int height = std::max(term_rows_ - 4, 8); // real terminal height, minus this overlay's own top/bottom border rows
+    int visible = std::max(1, height - 2);
+    int total = static_cast<int>(std::size(rows));
+    for (int r = 0; r < visible; ++r) {
+        if (r >= total) { frame << box_line("", W, border) << "\n"; continue; }
+        auto it = settings_.hotkeys.find(rows[r].first);
+        std::string key = (it != settings_.hotkeys.end() && !it->second.empty()) ? it->second : "-";
+        std::string line = pad_right(key, 14) + rows[r].second;
+        frame << box_line(line, W, border) << "\n";
+    }
+    frame << box_bottom(W, "[? / ESC] close", border) << "\n";
+}
+
+// ---------------------------------------------------------------------
+// Bulk add overlay (paste-a-playlist-link panel, "a" while Queue focused)
+// ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// Bulk add overlay (paste-a-playlist-link panel, "a" while Queue focused)
+// ---------------------------------------------------------------------
+// Deliberately NOT sized like Console/Settings/Cheatsheet -- those match
+// the player view or the terminal on purpose (real overlays meant to
+// take over the screen). This one is a small floating panel that only
+// takes as many rows as it actually has content for: an input row while
+// typing, then a short starred checklist once results come in. It never
+// grows to fill the terminal.
+
+// ---------------------------------------------------------------------
+// Floating panels (Bulk Add, Retry Lyrics) -- see app.h's comment on
+// draw_floating_panel() for why these don't clear the screen.
+// ---------------------------------------------------------------------
+
+void App::draw_floating_panel(std::ostringstream& frame, const std::vector<std::string>& lines, int panel_w, int W) const {
+    int panel_h = static_cast<int>(lines.size());
+    int start_col = 1 + std::max(0, (W - panel_w) / 2);
+    int start_row = 1 + std::max(0, (term_rows_ - panel_h) / 2 - kFloatingPanelUpShift);
+    start_row = std::clamp(start_row, 1, std::max(1, term_rows_ - panel_h));
+    for (int i = 0; i < panel_h; ++i) {
+        frame << "\x1b[" << (start_row + i) << ";" << start_col << "H" << lines[i];
+    }
+}
+
+std::vector<std::string> App::build_bulk_add_panel() const {
+    const int W = kBulkAddPanelWidth;   // 62, matches the reference design
+    const int inner_w = W - 2;          // 60 -- nested box width, flush against the outer border (no gap)
+    std::string border = ansi_for(settings_.border_color, false);
+    std::string obar = border.empty() ? settings_.box_vertical : (border + settings_.box_vertical + "\x1b[0m");
+    auto wrap = [&](const std::string& inner_line) { return obar + inner_line + obar; };
+
+    std::vector<std::string> lines;
+    lines.push_back(box_top("BULK ADD", W, border));
+
+    // --- input box (nested) ---
+    lines.push_back(wrap(box_top("", inner_w, border)));
+    std::string cursor_line = bulk_add_buffer_.empty()
+        ? "//:paste yt playlist link here"
+        : bulk_add_buffer_ + "\u2588"; // block cursor once typing starts, matches the Search bar's style
+    lines.push_back(wrap(box_line(cursor_line, inner_w, border)));
+    lines.push_back(wrap(box_bottom(inner_w, "", border)));
+
+    // --- results box (nested) -- always present at a fixed row count so
+    // the panel's total footprint never changes between phase 1 (typing)
+    // and phase 2 (results in) -- unused rows are just blank, not
+    // omitted, which is what keeps draw_floating_panel()'s fixed-
+    // rectangle overwrite artifact-free without ever needing a clear. ---
+    lines.push_back(wrap(box_top("", inner_w, border)));
+
+    const auto& items = pending_bulk_add_.items;
+    int total = static_cast<int>(items.size());
+    int show = bulk_add_results_ready_ ? std::min(total, kBulkAddVisibleRows) : 0;
+    int scroll = bulk_add_results_ready_ ? std::clamp(bulk_add_scroll_, 0, std::max(0, total - show)) : 0;
+
+    // Column widths measured directly from the reference design at its
+    // 56-column content width (inner_w - 4): title=27, channel=15, the
+    // rest is mark + " | " separators + the unpadded time text.
+    const int title_w = 27, chan_w = 15;
+
+    for (int r = 0; r < kBulkAddVisibleRows; ++r) {
+        if (r >= show) { lines.push_back(wrap(box_line("", inner_w, border))); continue; }
+        int idx = scroll + r;
+        const auto& it = items[idx];
+        bool starred = idx < static_cast<int>(bulk_add_selected_.size()) && bulk_add_selected_[idx];
+        bool hovering = idx == bulk_add_cursor_;
+
+        std::string mark = starred ? "*" : " ";
+        std::string title = truncate_str(it.title, title_w);
+        std::string chan = truncate_str(it.uploader.empty() ? "-" : it.uploader, chan_w);
+        std::string time_str = "-";
+        if (it.duration_sec >= 0) {
+            int secs = static_cast<int>(it.duration_sec);
+            time_str = std::to_string(secs / 60) + ":" + (secs % 60 < 10 ? "0" : "") + std::to_string(secs % 60);
+        }
+
+        std::string line = mark + " | " + pad_right(title, title_w) + " | " + pad_right(chan, chan_w) + " | " + time_str;
+        // Built plain first, then box_line() pads/truncates it (its
+        // truncate_str/pad_right count raw bytes, not display columns --
+        // they don't skip ANSI escapes), and only *after* that do we
+        // splice the reverse-video hover highlight into the already-
+        // finished bar+content+bar string. Wrapping `line` in "\x1b[7m"
+        // before handing it to box_line() would get its own length
+        // miscounted against the ANSI bytes and risk truncate_str
+        // slicing straight through the trailing "\x1b[0m" reset,
+        // leaking reverse-video onto every line after it -- exactly the
+        // bug build_list_panel avoids by coloring after padding, not
+        // before (see its own hover/cursor rendering).
+        std::string boxed = box_line(line, inner_w, border);
+        if (hovering) {
+            std::string vbar_len = border.empty() ? settings_.box_vertical : (border + settings_.box_vertical + "\x1b[0m");
+            size_t start = vbar_len.size() + 1; // past "bar + ' '"
+            size_t end = boxed.size() - vbar_len.size() - 1; // before "' ' + bar"
+            boxed = boxed.substr(0, start) + "\x1b[7m" + boxed.substr(start, end - start) + "\x1b[0m" + boxed.substr(end);
+        }
+        lines.push_back(wrap(boxed));
+    }
+
+    // Bottom border of the results box carries two plain-text labels --
+    // "[ N more ]" on the left (only once there's more than fits), "ALL"
+    // and "SELECT" on the right as the two commit actions. Just text, no
+    // button/tab border art.
+    int more = bulk_add_results_ready_ ? (total - show) : 0;
+    std::string left_label = more > 0 ? ("[ " + std::to_string(more) + " more ]") : "";
+    std::string right_label = bulk_add_results_ready_ ? "ALL   SELECT" : "";
+    std::string prefix = settings_.box_lower_left + settings_.box_horizontal;
+    if (!left_label.empty()) prefix += " " + left_label + " ";
+    std::string suffix = right_label.empty() ? "" : (" " + right_label + " ");
+    suffix += settings_.box_lower_right;
+    int used = display_width(prefix) + display_width(suffix);
+    int dashes = std::max(0, inner_w - used);
+    std::string bottom = prefix;
+    for (int i = 0; i < dashes; ++i) bottom += settings_.box_horizontal;
+    bottom += suffix;
+    bottom = pad_right(bottom, inner_w);
+    lines.push_back(wrap(border.empty() ? bottom : (border + bottom + "\x1b[0m")));
+
+    // Outer box's own bottom border carries "[ESC] cancel" directly.
+    lines.push_back(box_bottom(W, "[ESC] cancel", border));
+    return lines;
+}
+
+// ---------------------------------------------------------------------
+// Retry Lyrics (HKeyRetryLyrics, 'l') -- manual title/artist override
+// ---------------------------------------------------------------------
+
+std::vector<App::RLField> App::rl_visible_fields() const {
+    std::vector<RLField> f = {
+        RLField::Title, RLField::Artist, RLField::Ft,
+        RLField::TypeReverb, RLField::TypeSlowed, RLField::TypeUltraSlowed,
+        RLField::TypeSpedup, RLField::TypeRemix, RLField::TypeOther,
+    };
+    if (rl_remix_) f.push_back(RLField::RemixText);
+    if (rl_other_) f.push_back(RLField::OtherText);
+    return f;
+}
+
+bool* App::rl_bool_ptr(RLField f) {
+    switch (f) {
+        case RLField::TypeReverb: return &rl_reverb_;
+        case RLField::TypeSlowed: return &rl_slowed_;
+        case RLField::TypeUltraSlowed: return &rl_ultra_slowed_;
+        case RLField::TypeSpedup: return &rl_spedup_;
+        case RLField::TypeRemix: return &rl_remix_;
+        case RLField::TypeOther: return &rl_other_;
+        default: return nullptr;
+    }
+}
+
+std::string* App::rl_text_ptr(RLField f) {
+    switch (f) {
+        case RLField::Title: return &rl_title_;
+        case RLField::Artist: return &rl_artist_;
+        case RLField::Ft: return &rl_ft_;
+        case RLField::RemixText: return &rl_remix_text_;
+        case RLField::OtherText: return &rl_other_text_;
+        default: return nullptr;
+    }
+}
+
+// Pre-fills from the current track's metadata_ rather than opening
+// blank, and resets every other bit of state -- so reopening after a
+// previous override (or a previous cancel) never leaks stale values
+// from last time.
+void App::rl_open_from_current_track() {
+    rl_title_ = metadata_.name;
+    rl_artist_ = (metadata_.artist == "-") ? "" : metadata_.artist;
+    rl_ft_.clear();
+
+    // Best-effort ft./feat. split: if the title itself carries a
+    // "feat."/"ft." tag, pull it out into its own field rather than
+    // leaving it embedded (so it doesn't get double-appended once the
+    // TYPE tags get tacked on after the title at submit time).
+    static const std::vector<std::string> markers = {" feat. ", " feat ", " ft. ", " ft "};
+    std::string lower_title = metadata_.name;
+    std::transform(lower_title.begin(), lower_title.end(), lower_title.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
+    for (const auto& marker : markers) {
+        size_t pos = lower_title.find(marker);
+        if (pos != std::string::npos) {
+            rl_title_ = metadata_.name.substr(0, pos);
+            rl_ft_ = metadata_.name.substr(pos + marker.size());
+            // trim a trailing ')' if the split landed inside "(feat. X)"
+            if (!rl_ft_.empty() && rl_ft_.back() == ')') rl_ft_.pop_back();
+            while (!rl_title_.empty() && (rl_title_.back() == ' ' || rl_title_.back() == '(')) rl_title_.pop_back();
+            break;
+        }
+    }
+
+    rl_remix_text_.clear();
+    rl_other_text_.clear();
+    rl_reverb_ = rl_slowed_ = rl_ultra_slowed_ = rl_spedup_ = rl_remix_ = rl_other_ = false;
+    rl_focus_ = RLField::Title;
+}
+
+// Builds "title [ft. X] [tags...]" and launches the override fetch --
+// this is the actual point of the whole form: feeding a corrected
+// query into fetch_synced_lyrics() instead of the track's real
+// metadata, for tracks whose auto-fetched lyrics are wrong/missing.
+void App::rl_submit() {
+    std::string query = rl_title_;
+    if (!rl_ft_.empty()) query += " ft. " + rl_ft_;
+
+    // Tags go after the title (per your note: "you usually need to place
+    // them after title in url"). Slowed/Ultra Slowed/Spedup are mutually
+    // exclusive so at most one of these three contributes; Reverb/Remix/
+    // Other are independent and can stack with it and each other.
+    if (rl_slowed_) query += " slowed";
+    else if (rl_ultra_slowed_) query += " ultra slowed";
+    else if (rl_spedup_) query += " sped up";
+    if (rl_reverb_) query += " reverb";
+    if (rl_remix_) query += rl_remix_text_.empty() ? " remix" : (" " + rl_remix_text_ + " remix");
+    if (rl_other_ && !rl_other_text_.empty()) query += " " + rl_other_text_;
+
+    launch_lyrics_fetch(query, rl_artist_, current_path_, /*force_network=*/true);
+    log_event("retrying lyrics: \"" + query + "\"");
+
+    mode_ = Mode::Browse;
+}
+
+std::vector<std::string> App::build_retry_lyrics_panel() const {
+    const int W = kRetryLyricsPanelWidth; // 62, matches the reference design
+    const int label_w = 14;               // left label column, blank on box top/bottom rows
+    const int box_w = W - 2 - label_w;    // 46 -- nested input box width
+    std::string border = ansi_for(settings_.border_color, false);
+    std::string obar = border.empty() ? settings_.box_vertical : (border + settings_.box_vertical + "\x1b[0m");
+    auto wrap = [&](const std::string& left, const std::string& right) { return obar + left + right + obar; };
+    auto label = [&](const std::string& text) { return pad_left(text, label_w - 2) + " :"; };
+    auto blank_label = [&] { return std::string(label_w, ' '); };
+
+    // A text field: label appears only on the middle (content) row, the
+    // nested box's own top/bottom rows get a blank label column.
+    // `placeholder` shows only when the field is both empty AND not
+    // currently focused -- e.g. REMIX/OTHER's "NOT SELECTED". While
+    // actively editing an empty field, show just the cursor rather than
+    // the placeholder text glued to it (which would otherwise look like
+    // "NOT SELECTED" was real, already-typed content).
+    auto text_field = [&](RLField f, const std::string& lbl, const std::string& value,
+                           const std::string& placeholder, std::vector<std::string>& out) {
+        out.push_back(wrap(blank_label(), box_top("", box_w, border)));
+        bool focused = (rl_focus_ == f);
+        std::string shown = (value.empty() && !focused) ? placeholder : value;
+        if (focused) shown += "\u2588"; // block cursor, same convention as Search/Bulk Add
+        out.push_back(wrap(label(lbl), box_line(shown, box_w, border)));
+        out.push_back(wrap(blank_label(), box_bottom(box_w, "", border)));
+    };
+
+    std::vector<std::string> lines;
+    lines.push_back(box_top("Retry Lyrics", W, border));
+
+    text_field(RLField::Title, "SONG TITLE", rl_title_, "", lines);
+    text_field(RLField::Artist, "ARTIST NAME", rl_artist_, "", lines);
+    text_field(RLField::Ft, "FT  ( opt )", rl_ft_, "", lines);
+
+    // TYPE: two rows of plain (non-boxed) checkbox-style toggles.
+    // Slowed/Ultra Slowed/Spedup are a radio group (only one can show
+    // "[o]" at a time); Reverb/Remix/Other are independent.
+    //
+    // Built and measured as plain ASCII first, then the focus highlight
+    // is spliced in by byte offset *after* pad_right/truncate_str has
+    // already run -- same reasoning as the bulk-add hover fix above:
+    // those two don't skip ANSI escapes when counting width, so
+    // wrapping an option in "\x1b[7m" before truncating/padding the row
+    // risks slicing through the reset code and leaking reverse-video
+    // onto the rest of the panel. Every word here is plain ASCII, so a
+    // byte offset is also a column offset -- no UTF-8 width subtleties
+    // to worry about.
+    auto opt_plain = [&](bool checked, const std::string& word) { return (checked ? "[o] " : " o  ") + word; };
+    auto type_row = [&](std::initializer_list<std::tuple<RLField, bool, std::string>> opts) {
+        std::string plain = " ";
+        int focus_start = -1, focus_len = 0;
+        for (const auto& [f, checked, word] : opts) {
+            std::string s = opt_plain(checked, word);
+            if (rl_focus_ == f) { focus_start = static_cast<int>(plain.size()); focus_len = static_cast<int>(s.size()); }
+            plain += s;
+            plain += " ";
+        }
+        std::string padded = pad_right(truncate_str(plain, box_w), box_w);
+        if (focus_start >= 0 && focus_start + focus_len <= static_cast<int>(padded.size())) {
+            padded = padded.substr(0, focus_start) + "\x1b[7m" + padded.substr(focus_start, focus_len) +
+                     "\x1b[0m" + padded.substr(focus_start + focus_len);
+        }
+        return padded;
+    };
+    lines.push_back(wrap(label("TYPE"),
+        type_row({{RLField::TypeReverb, rl_reverb_, "reverb"},
+                  {RLField::TypeSlowed, rl_slowed_, "slowed"},
+                  {RLField::TypeUltraSlowed, rl_ultra_slowed_, "ultra slowed"}})));
+    lines.push_back(wrap(blank_label(),
+        type_row({{RLField::TypeSpedup, rl_spedup_, "spedup"},
+                  {RLField::TypeRemix, rl_remix_, "remix"},
+                  {RLField::TypeOther, rl_other_, "other /pls specify"}})));
+
+    // REMIX / OTHER: dynamically present -- only when their TYPE toggle
+    // is on. When hidden, still reserve their 3 rows as blank (not
+    // omitted) so the panel's total height never changes frame to frame
+    // -- draw_floating_panel() stamps a fixed rectangle every frame with
+    // no clear, so a shrinking panel would otherwise leave stale
+    // characters behind at the edges it used to cover.
+    if (rl_remix_) {
+        text_field(RLField::RemixText, "REMIX", rl_remix_text_, "NOT SELECTED", lines);
+    } else {
+        for (int i = 0; i < 3; ++i) lines.push_back(wrap(blank_label(), std::string(box_w, ' ')));
+    }
+    if (rl_other_) {
+        text_field(RLField::OtherText, "OTHER", rl_other_text_, "NOT SELECTED", lines);
+    } else {
+        for (int i = 0; i < 3; ++i) lines.push_back(wrap(blank_label(), std::string(box_w, ' ')));
+    }
+
+    std::string fetch_word = "enter to fetch";
+    std::string hint = pad_left(fetch_word, W - 2 - 2); // 2 trailing spaces before the border, matching the reference
+    lines.push_back(wrap("", pad_right(hint, W - 2)));
+
+    lines.push_back(box_bottom(W, "[ESC] cancel", border));
+    return lines;
+}
+
+// The Console and Settings overlays must always be exactly as tall as
+// the Browse-mode player view -- see the comment on this declaration in
+// app.h. This recomputes the same panel line counts render_frame()'s
+// Browse-mode branch does, plus list_visible_rows_ (already kept
+// up to date each frame -- see render_frame()) for the list/queue
+// panel's share.
+int App::player_view_height(int w) const {
+    int h = static_cast<int>(build_metadata_panel(w).size());
+    h += static_cast<int>(build_progress_panel(w).size());
+    h += static_cast<int>(build_search_bar(w).size());
+    h += list_visible_rows_;
+    h += 1; // blank separator line
+    h += 1; // status/loading line -- reserved even when currently empty, so this doesn't jitter frame to frame
+    return h;
+}
+
 // ---------------------------------------------------------------------
 // Frame assembly
 // ---------------------------------------------------------------------
@@ -2300,15 +3275,38 @@ std::string App::render_frame(TerminalIO& term) {
     // always assuming at least 80 columns are available.
     int W = std::clamp(term_cols, 40, 200);
 
-    // The settings screen now renders at a fixed height (MAX_Y=21)
-    // regardless of which tab is active -- matching the reference, which
-    // does an unconditional \x1b[2J at the top of every settings frame
-    // rather than tracking soft-clear/erase state at all. Settings is a
-    // static, input-driven overlay (not the animated player view where
-    // full-clear flicker actually matters), so always hard-clearing here
-    // is simpler and correct, and sidesteps the tab-switch height-change
-    // question entirely since height no longer varies by tab.
-    bool hard_clear = (W != last_render_w_) || (mode_ != last_render_mode_) || force_redraw_;
+    // Real terminal row count -- see term_rows_'s comment in app.h for
+    // the full story on why this now actually gets consulted. rows()
+    // itself already falls back to a sane default (40) if the ioctl
+    // fails, so no extra guarding needed here beyond a floor against
+    // truly pathological values feeding into subtraction below.
+    term_rows_ = std::max(term.rows(), 4);
+
+    // Browse/BulkAdd/RetryLyrics all share the same live background (the
+    // latter two float a small panel on top of it -- see
+    // draw_floating_panel()'s comment in app.h), so switching between
+    // them never needs a full clear, only a redraw. Settings/Console/
+    // Cheatsheet are still genuine full-screen takeovers, so entering or
+    // leaving any of *those* still forces one, same as a real mode
+    // change always has.
+    auto mode_family = [](Mode m) {
+        switch (m) {
+            case Mode::Browse: case Mode::Search: case Mode::BulkAdd: case Mode::RetryLyrics: return 0;
+            case Mode::Settings: case Mode::ColorEdit: return 1;
+            case Mode::Console: return 2;
+            case Mode::Cheatsheet: return 3;
+        }
+        return 0;
+    };
+    bool hard_clear = (W != last_render_w_) || (mode_family(mode_) != mode_family(last_render_mode_)) || force_redraw_;
+    if (last_render_w_ != -1 && W != last_render_w_) {
+        // Verbose-only: raw ioctl terminal size alongside the clamped
+        // app-usable width, i.e. "what the OS actually told us" versus
+        // what we did with it.
+        ConsoleLog::instance().log_verbose(
+            "terminal resized: " + std::to_string(last_render_w_) + " -> " + std::to_string(W) +
+            " cols (raw ioctl cols=" + std::to_string(term_cols) + ", rows=" + std::to_string(term_rows_) + ")");
+    }
     force_redraw_ = false; // one-shot -- consumed by this frame
     last_render_w_ = W;
     last_render_mode_ = mode_;
@@ -2317,20 +3315,51 @@ std::string App::render_frame(TerminalIO& term) {
     if (mode_ == Mode::Settings || mode_ == Mode::ColorEdit) {
         std::ostringstream frame;
         frame << "\x1b[2J\x1b[H\x1b[?25l";
-        build_settings_screen(frame, W, main_frame_height(std::max(W, 80)));
-        return frame.str();
+        build_settings_screen(frame, W, player_view_height(W));
+        return clamp_output_rows(frame.str(), term_rows_);
     }
+
+    if (mode_ == Mode::Console) {
+        std::ostringstream frame;
+        frame << "\x1b[2J\x1b[H\x1b[?25l";
+        build_console_screen(frame, W, player_view_height(W));
+        return clamp_output_rows(frame.str(), term_rows_);
+    }
+
+    if (mode_ == Mode::Cheatsheet) {
+        std::ostringstream frame;
+        frame << "\x1b[2J\x1b[H\x1b[?25l";
+        build_cheatsheet_screen(frame, W);
+        return clamp_output_rows(frame.str(), term_rows_);
+    }
+
+    // --- Browse mode (and the background behind BulkAdd/RetryLyrics):
+    // figure out how many list/queue rows actually fit before building
+    // anything, so the panel is sized right the first time instead of
+    // being built tall and then chopped.
+    auto metadata_lines = build_metadata_panel(W);
+    auto progress_lines = build_progress_panel(W);
+    auto search_lines = build_search_bar(W);
+    int fixed_h = static_cast<int>(metadata_lines.size() + progress_lines.size() + search_lines.size())
+                + 1  // blank separator line
+                + 1; // status/loading line (reserved even when empty, so it doesn't jitter frame to frame)
+    // -1 extra margin: leave the terminal's very last row untouched so a
+    // trailing '\n' after the final printed line can never itself force
+    // a scroll (see clamp_output_rows()'s comment for the same reasoning
+    // applied as a hard backstop).
+    int available_for_list = term_rows_ - fixed_h - 1;
+    list_visible_rows_ = std::clamp(available_for_list, 0, kListVisibleRows);
 
     ensure_visible_row_meta();
 
     std::ostringstream frame;
     frame << clear_prefix;
 
-    for (auto& l : build_metadata_panel(W)) frame << l << "\n";
-    for (auto& l : build_progress_panel(W)) frame << l << "\n";
-    for (auto& l : build_search_bar(W)) frame << l << "\n";
+    for (auto& l : metadata_lines) frame << l << "\n";
+    for (auto& l : progress_lines) frame << l << "\n";
+    for (auto& l : search_lines) frame << l << "\n";
 
-    int list_h = kListVisibleRows;
+    int list_h = list_visible_rows_;
     if (settings_.element_queue) {
         int list_w = W / 2;
         int queue_w = W - list_w; // exact 50/50, remainder (odd W) goes to queue
@@ -2358,7 +3387,53 @@ std::string App::render_frame(TerminalIO& term) {
     }
 
     frame << "\x1b[0J";
-    return frame.str();
+
+    // Bulk Add / Retry Lyrics: stamp their floating panel on top of the
+    // still-live background just built above, rather than replacing it.
+    // Uses absolute positioning (draw_floating_panel()), so it's simply
+    // appended after the background's own sequential top-to-bottom
+    // writes -- whichever content lands on a given screen cell last in
+    // the stream wins, and the panel is emitted after, so it draws over
+    // the background wherever they overlap without needing a clear.
+    if (mode_ == Mode::BulkAdd) {
+        draw_floating_panel(frame, build_bulk_add_panel(), kBulkAddPanelWidth, W);
+    } else if (mode_ == Mode::RetryLyrics) {
+        draw_floating_panel(frame, build_retry_lyrics_panel(), kRetryLyricsPanelWidth, W);
+    }
+
+    // Hard safety net on top of the list_visible_rows_ sizing above: even
+    // if the fixed chrome alone (metadata+progress+search bar) is taller
+    // than the terminal -- a case list_visible_rows_ can't do anything
+    // about, since it only controls the list panel -- this guarantees
+    // the actual byte stream handed to the terminal never contains more
+    // rows than the terminal has, so it structurally cannot scroll no
+    // matter what future panels/config combinations produce. Only
+    // applied to the background portion's line count implicitly (the
+    // floating panel's absolute-positioned writes come after and are
+    // already bounds-checked by draw_floating_panel() itself, so
+    // clamping here by counting trailing '\n's is still correct -- the
+    // panel's writes don't add any that would trip this).
+    return clamp_output_rows(frame.str(), term_rows_);
+}
+
+// Keeps at most (term_rows - 1) lines of `frame` (the -1 leaves the
+// terminal's last row untouched, so the final line's trailing '\n' can
+// never itself trigger a scroll) and drops everything after that,
+// escape-code prefixes and all -- this is the hard backstop described
+// in term_rows_'s comment in app.h: whatever the panel-sizing logic
+// above computed, the actual printed output can never exceed what the
+// real terminal can show without scrolling. Content past the cutoff is
+// simply not drawn this frame rather than causing any corruption.
+std::string App::clamp_output_rows(const std::string& frame, int term_rows) const {
+    int max_lines = std::max(1, term_rows - 1);
+    int newlines_seen = 0;
+    for (size_t i = 0; i < frame.size(); ++i) {
+        if (frame[i] == '\n') {
+            ++newlines_seen;
+            if (newlines_seen >= max_lines) return frame.substr(0, i + 1);
+        }
+    }
+    return frame; // already within budget
 }
 
 // ---------------------------------------------------------------------
@@ -2366,12 +3441,43 @@ std::string App::render_frame(TerminalIO& term) {
 // ---------------------------------------------------------------------
 
 int App::run() {
-    if (!local_view_.empty()) {
+    ConsoleLog::instance().init(settings_.console_verbosity == 1 ? LogVerbosity::Verbose : LogVerbosity::Basic);
+    {
+        // Verbose-only startup facts -- "what the OS provided" at the
+        // very start of the session, before anything else has run.
+        struct utsname uts{};
+        if (uname(&uts) == 0) {
+            ConsoleLog::instance().log_verbose(std::string("os: ") + uts.sysname + " " + uts.release + " " + uts.machine);
+        }
+        ConsoleLog::instance().log_verbose("home: " + std::string(std::getenv("HOME") ? std::getenv("HOME") : "(unset)"));
+    }
+
+    // Session snapshot restore -- only when the feature's on. A missing
+    // or corrupt snapshot.json is treated identically to "no snapshot at
+    // all" (load_snapshot() already guards that), so this always falls
+    // back to the normal cold-start behavior on any failure.
+    bool restored = false;
+    if (settings_.autosave_enabled) {
+        SnapshotData snap;
+        if (load_snapshot(snap)) {
+            restore_snapshot(snap);
+            restored = true;
+            // Consumed exactly once -- see snapshot.h's delete_snapshot()
+            // comment for why this happens right after a successful
+            // restore rather than only at the next autosave/exit.
+            delete_snapshot();
+            log_event("restored previous session");
+        }
+    }
+    if (!restored && !local_view_.empty()) {
         selected_ = 0;
         start_local_track(local_view_[0]);
     }
+
     TerminalIO term;
     last_frame_time_ = std::chrono::steady_clock::now();
+    last_autosave_at_ = std::chrono::steady_clock::now();
+    ConsoleLog::instance().log_verbose("terminal: " + std::to_string(term.rows()) + "x" + std::to_string(term.cols()) + " (rows x cols, raw ioctl)");
 
     while (!quit_) {
         int key = term.poll_key();
@@ -2380,6 +3486,8 @@ int App::run() {
         poll_pending_search();
         poll_pending_load();
         poll_pending_waveform();
+        poll_pending_bulk_add();
+        maybe_autosave();
 
         auto now = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(now - last_frame_time_).count();
@@ -2411,9 +3519,17 @@ int App::run() {
     player_.stop();
     term.restore();
     save_settings(settings_);
+    // Final snapshot on a clean quit -- same single-canonical-file
+    // save_snapshot() the 30s autosave tick uses, just with the exact
+    // position at the moment of quitting rather than up to 30s stale.
+    if (settings_.autosave_enabled) {
+        save_snapshot(build_snapshot());
+        ConsoleLog::instance().log_basic("saved session snapshot on exit");
+    }
     if (load_thread_.joinable()) load_thread_.join();
     if (search_thread_.joinable()) search_thread_.join();
     if (device_thread_.joinable()) device_thread_.join();
+    if (bulk_add_thread_.joinable()) bulk_add_thread_.join();
     std::cout << "\nbye.\n";
     return 0;
 }

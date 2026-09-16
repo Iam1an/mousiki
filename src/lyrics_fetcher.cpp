@@ -244,10 +244,12 @@ LyricsResult fetch_synced_lyrics(const std::string& title, const std::string& ar
         // fall through to network chain if the sidecar was empty/unparseable
     }
 
-    // 2) Python helper: syncedlyrics only (word-level "enhanced" search
-    //    first, falls back to plain line-synced search). Paxsenix used to
-    //    sit in this chain as a faster fallback but was unreliable enough
-    //    (frequent misses/garbage) that it's been dropped entirely.
+    // 2) Python helper (scripts/fetch_lyrics.py): Better Lyrics first
+    //    (word-level enhanced LRC from TTML), falling back to LRCLIB
+    //    (line-synced only) -- see scripts/lrc.py for the actual fetch
+    //    logic. Paxsenix and syncedlyrics used to sit in this chain but
+    //    were dropped: Paxsenix for being unreliable, syncedlyrics in
+    //    favor of calling Better Lyrics/LRCLIB directly.
     std::string cmd = "python3 " + shell_quote(helper_script_path) +
                        " " + shell_quote(title) + " " + shell_quote(artist);
     ProcResult r = run_capture(cmd, /*merge_stderr=*/false);
@@ -275,7 +277,7 @@ LyricsResult fetch_synced_lyrics(const std::string& title, const std::string& ar
 
         if (err == "MODULE_MISSING") {
             result.status = LyricsStatus::ModuleMissing;
-            result.message = "run: pip install syncedlyrics";
+            result.message = "run: pip install requests";
         } else if (err == "NOT_FOUND") {
             result.status = LyricsStatus::NotFound;
             result.message = "no lyrics found for \"" + title + "\"";
@@ -293,7 +295,7 @@ LyricsResult fetch_synced_lyrics(const std::string& title, const std::string& ar
 
     result.lines = parse_lrc(lrc, enhanced);
     result.status = LyricsStatus::Ok;
-    result.source = source.empty() ? "syncedlyrics" : source;
+    result.source = source.empty() ? "better-lyrics" : source;
     result.raw_lrc = lrc;
     result.message = (enhanced ? "word-synced lyrics" : "line-synced lyrics") + std::string(" (") + result.source + ")";
 

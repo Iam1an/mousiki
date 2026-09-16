@@ -86,7 +86,7 @@ cd mousiki
 bash setup.sh
 ```
 
-If you're building manually, ensure you have `cmake`, a C++17 compiler, `ffmpeg`, `yt-dlp`, and the Python `syncedlyrics` package installed.
+If you're building manually, ensure you have `cmake`, a C++17 compiler, `ffmpeg`, `yt-dlp`, and the Python `requests` package installed.
 
 ### Running the App
 
@@ -115,7 +115,7 @@ Mousiki stands on the shoulders of giants. A huge thank you to the developers be
 - **[miniaudio](https://github.com/mackron/miniaudio):** An incredible single-file audio playback and capture library.
 - **[kissfft](https://github.com/mborgerding/kissfft):** A wonderfully simple and lightweight real-input FFT library (powering the spectrum visualizer).
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp):** The backend magic for our online search and streaming capabilities.
-- **[syncedlyrics](https://github.com/rtcq/syncedlyrics):** Python package fetching the synced lyrics data.
+- **requests:** Python package used by `scripts/lrc.py` to fetch synced lyrics from Better Lyrics (primary) and [LRCLIB](https://lrclib.net) (fallback).
 - **[FFmpeg](https://ffmpeg.org/):** The Swiss army knife of multimedia handling.
 
 <div align="center">
@@ -135,7 +135,7 @@ This project is open-sourced under the [Apache License 2.0](LICENSE).
 </a>
 
 ---
-*made by [itzender5820](https://github.com/itzender5820)*
+*Crafted with ❤️ for the terminal by [itzender5820](https://github.com/itzender5820)*
 
 
 <p align="center">

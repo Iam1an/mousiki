@@ -105,9 +105,10 @@ fi
 # -------------------------------
 # Python environment
 # -------------------------------
-# syncedlyrics is a SOFT dependency: mousiki must still build and run
-# without it, regardless of what Python environment (or lack thereof)
-# the user has. Nothing in this section is allowed to exit the script.
+# requests (used by the lyrics fetcher) is a SOFT dependency: mousiki
+# must still build and run without it, regardless of what Python
+# environment (or lack thereof) the user has. Nothing in this section is
+# allowed to exit the script.
 
 echo "======== Checking Python environment =========="
 
@@ -141,49 +142,60 @@ fi
 echo ""
 
 # -------------------------------
-# syncedlyrics (soft dependency)
+# requests (soft dependency)
 # -------------------------------
+# The lyrics fetcher (scripts/lrc.py) needs Python's `requests` package to
+# talk to Better Lyrics/LRCLIB. This used to be `syncedlyrics`; the actual
+# package changed but the soft-dependency contract hasn't: mousiki must
+# still build and run fine without it, lyrics just won't be available.
 
-SYNCEDLYRICS_OK=false
+REQUESTS_OK=false
 
-syncedlyrics_installed() {
+requests_installed() {
     # Covers pip/pip3 installs (regular or --user) into the active interpreter.
-    if "$PYTHON_CMD" -c "import syncedlyrics" >/dev/null 2>&1; then
+    if "$PYTHON_CMD" -c "import requests" >/dev/null 2>&1; then
         return 0
     fi
 
     # Covers pipx's isolated venv installs. `pipx list --short` prints a
-    # predictable "<name> <version>" line per app, unlike the indented
+    # predictable "<n> <version>" line per app, unlike the indented
     # human-readable `pipx list`, which is not safe to grep by anchor.
-    if [ -n "$PIPX_CMD" ] && "$PIPX_CMD" list --short 2>/dev/null | grep -q '^syncedlyrics '; then
+    if [ -n "$PIPX_CMD" ] && "$PIPX_CMD" list --short 2>/dev/null | grep -q '^requests '; then
         return 0
     fi
 
     return 1
 }
 
-install_syncedlyrics() {
+install_requests() {
     local mgr
 
     for mgr in "${PY_MANAGERS[@]}"; do
-        echo "==> Trying to install syncedlyrics with $mgr..."
+        echo "==> Trying to install requests with $mgr..."
 
         case "$mgr" in
             pipx)
-                if "$PIPX_CMD" install syncedlyrics >/dev/null 2>&1; then
-                    echo "Installed syncedlyrics with pipx."
+                # pipx normally installs CLI *applications* into their own
+                # isolated venv, not libraries -- but `pipx install
+                # requests` still works (it just isolates the package),
+                # and scripts/fetch_lyrics.py knows how to find that venv's
+                # site-packages at runtime and splice it onto sys.path (see
+                # _find_pipx_site_packages() there), the same way it would
+                # for any other pipx-isolated package.
+                if "$PIPX_CMD" install requests >/dev/null 2>&1; then
+                    echo "Installed requests with pipx."
                     return 0
                 fi
                 ;;
             pip3)
-                if "$PIP3_CMD" install --user syncedlyrics >/dev/null 2>&1; then
-                    echo "Installed syncedlyrics with pip3."
+                if "$PIP3_CMD" install --user requests >/dev/null 2>&1; then
+                    echo "Installed requests with pip3."
                     return 0
                 fi
                 ;;
             pip)
-                if "$PIP_CMD" install --user syncedlyrics >/dev/null 2>&1; then
-                    echo "Installed syncedlyrics with pip."
+                if "$PIP_CMD" install --user requests >/dev/null 2>&1; then
+                    echo "Installed requests with pip."
                     return 0
                 fi
                 ;;
@@ -195,39 +207,38 @@ install_syncedlyrics() {
     return 1
 }
 
-if syncedlyrics_installed; then
-    printf "%-14s ✓\n" "syncedlyrics"
-    SYNCEDLYRICS_OK=true
+if requests_installed; then
+    printf "%-14s ✓\n" "requests"
+    REQUESTS_OK=true
 else
-    printf "%-14s ✗  (optional)\n" "syncedlyrics"
+    printf "%-14s ✗  (optional)\n" "requests"
     echo ""
 
     if [ ${#PY_MANAGERS[@]} -eq 0 ]; then
         echo "No Python package manager (pip, pip3, pipx) was found."
-        echo "syncedlyrics is optional, so setup will continue without it."
+        echo "requests is optional, so setup will continue without it."
         echo "Install pip/pip3/pipx and re-run this script later to add it."
     else
-        if install_syncedlyrics; then
-            if syncedlyrics_installed; then
-                SYNCEDLYRICS_OK=true
+        if install_requests; then
+            if requests_installed; then
+                REQUESTS_OK=true
             else
                 echo ""
-                echo "syncedlyrics reported a successful install but could not"
+                echo "requests reported a successful install but could not"
                 echo "be verified. Continuing anyway since it is optional."
             fi
         else
             echo ""
-            echo "Could not install syncedlyrics automatically."
+            echo "Could not install requests automatically."
             echo "This is optional -- mousiki will still build and run without it."
             echo "You can install it later yourself, e.g.:"
-            [ -n "$PIPX_CMD" ] && echo "  pipx install syncedlyrics"
-            [ -n "$PIP3_CMD" ] && echo "  pip3 install --user syncedlyrics"
-            [ -n "$PIP_CMD" ] && echo "  pip install --user syncedlyrics"
+            [ -n "$PIPX_CMD" ] && echo "  pipx install requests"
+            [ -n "$PIP3_CMD" ] && echo "  pip3 install --user requests"
+            [ -n "$PIP_CMD" ] && echo "  pip install --user requests"
         fi
     fi
 fi
 
-echo ""
 
 # -------------------------------
 # Install missing dependencies
@@ -336,10 +347,10 @@ if [ "$IS_TERMUX" = true ] && ! check_command clang; then
     exit 1
 fi
 
-if [ "$SYNCEDLYRICS_OK" = true ]; then
-    printf "%-14s ✓\n" "syncedlyrics"
+if [ "$REQUESTS_OK" = true ]; then
+    printf "%-14s ✓\n" "requests"
 else
-    printf "%-14s ✗  (optional, skipping)\n" "syncedlyrics"
+    printf "%-14s ✗  (optional, skipping)\n" "requests"
 fi
 
 echo ""

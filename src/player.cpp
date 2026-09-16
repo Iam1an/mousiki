@@ -1,5 +1,6 @@
 #include "player.h"
 #include "audio_backend.h"
+#include "console_log.h"
 #include <algorithm>
 #include <cstring>
 
@@ -71,15 +72,24 @@ bool Player::play(std::shared_ptr<StreamingPcm> pcm, double start_sec, int volum
     cfg.pUserData = this;
 
     ma_context* ctx = context_ready_ ? &context_ : nullptr;
-    if (ma_device_init(ctx, &cfg, &device_) != MA_SUCCESS) {
+    ma_result init_res = ma_device_init(ctx, &cfg, &device_);
+    if (init_res != MA_SUCCESS) {
         pcm_.reset();
+        ConsoleLog::instance().log_verbose(
+            std::string("audio: ma_device_init failed: ") + ma_result_description(init_res));
         return false;
     }
-    if (ma_device_start(&device_) != MA_SUCCESS) {
+    ma_result start_res = ma_device_start(&device_);
+    if (start_res != MA_SUCCESS) {
         ma_device_uninit(&device_);
         pcm_.reset();
+        ConsoleLog::instance().log_verbose(
+            std::string("audio: ma_device_start failed: ") + ma_result_description(start_res));
         return false;
     }
+    ConsoleLog::instance().log_verbose(
+        std::string("audio: device started, backend=") + ma_get_backend_name(device_.pContext->backend) +
+        ", rate=" + std::to_string(sample_rate_) + "Hz");
 
     device_ready_ = true;
     return true;
