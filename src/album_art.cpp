@@ -1,11 +1,11 @@
 #include "album_art.h"
 #include "process_util.h"
+#include "tiny_json.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
-#include <regex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -197,113 +197,14 @@ fs::path album_art_path(const std::string& title) {
 }
 
 // --- helper-script JSON ------------------------------------------------
-// Same reasoning as lyrics_fetcher.cpp: the helper emits one flat,
-// single-line object of a shape we control, so a few lines of string
-// scanning beat taking on a JSON dependency.
-
-static bool json_get_bool(const std::string& json, const std::string& key, bool fallback) {
-    std::regex re("\"" + key + "\"\\s*:\\s*(true|false)");
-    std::smatch m;
-    if (std::regex_search(json, m, re)) return m[1] == "true";
-    return fallback;
-}
-
-static std::string json_unescape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] != '\\' || i + 1 >= s.size()) { out += s[i]; continue; }
-        char n = s[i + 1];
-        if (n == 'n') { out += '\n'; ++i; }
-        else if (n == 't') { out += '\t'; ++i; }
-        else if (n == 'r') { out += '\r'; ++i; }
-        else if (n == '"' || n == '\\' || n == '/') { out += n; ++i; }
-        else if (n == 'u' && i + 5 < s.size()) {
-            // Python's json.dumps escapes every non-ASCII character as
-            // \uXXXX by default, and a path can legitimately contain
-            // them (a home directory with an accent in it), so these
-            // have to be folded back to UTF-8 rather than passed through
-            // as literal backslash-u text — which would produce a path
-            // that simply doesn't exist.
-            uint32_t cp = 0;
-            bool ok = true;
-            for (int k = 0; k < 4 && ok; ++k) {
-                char d = s[i + 2 + k];
-                if (d >= '0' && d <= '9') cp = (cp << 4) | static_cast<uint32_t>(d - '0');
-                else if (d >= 'a' && d <= 'f') cp = (cp << 4) | static_cast<uint32_t>(d - 'a' + 10);
-                else if (d >= 'A' && d <= 'F') cp = (cp << 4) | static_cast<uint32_t>(d - 'A' + 10);
-                else ok = false;
-            }
-            if (!ok) { out += s[i]; continue; }
-            size_t consumed = 5; // \uXXXX minus the loop's own ++i
-            // A codepoint above the BMP arrives as a surrogate pair; the
-            // halves are meaningless on their own, so combine them.
-            if (cp >= 0xD800 && cp <= 0xDBFF && i + 11 < s.size() &&
-                s[i + 6] == '\\' && s[i + 7] == 'u') {
-                uint32_t lo = 0;
-                bool ok2 = true;
-                for (int k = 0; k < 4 && ok2; ++k) {
-                    char d = s[i + 8 + k];
-                    if (d >= '0' && d <= '9') lo = (lo << 4) | static_cast<uint32_t>(d - '0');
-                    else if (d >= 'a' && d <= 'f') lo = (lo << 4) | static_cast<uint32_t>(d - 'a' + 10);
-                    else if (d >= 'A' && d <= 'F') lo = (lo << 4) | static_cast<uint32_t>(d - 'A' + 10);
-                    else ok2 = false;
-                }
-                if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
-                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    consumed = 11;
-                }
-            }
-            if (cp <= 0x7F) {
-                out += static_cast<char>(cp);
-            } else if (cp <= 0x7FF) {
-                out += static_cast<char>(0xC0 | (cp >> 6));
-                out += static_cast<char>(0x80 | (cp & 0x3F));
-            } else if (cp <= 0xFFFF) {
-                out += static_cast<char>(0xE0 | (cp >> 12));
-                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                out += static_cast<char>(0x80 | (cp & 0x3F));
-            } else {
-                out += static_cast<char>(0xF0 | (cp >> 18));
-                out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-                out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                out += static_cast<char>(0x80 | (cp & 0x3F));
-            }
-            i += consumed;
-        } else {
-            out += s[i];
-        }
-    }
-    return out;
-}
-
-static bool json_get_string(const std::string& json, const std::string& key, std::string& out) {
-    // Finds "key":"....(possibly escaped)...."
-    std::string needle = "\"" + key + "\"";
-    size_t kpos = json.find(needle);
-    if (kpos == std::string::npos) return false;
-    size_t colon = json.find(':', kpos + needle.size());
-    if (colon == std::string::npos) return false;
-    size_t qstart = json.find('"', colon);
-    if (qstart == std::string::npos) return false;
-    size_t i = qstart + 1;
-    std::string raw;
-    while (i < json.size()) {
-        // A backslash pair is copied verbatim so an escaped quote can't
-        // be mistaken for the closing one; the unescaping happens after.
-        if (json[i] == '\\' && i + 1 < json.size()) {
-            raw += json[i];
-            raw += json[i + 1];
-            i += 2;
-            continue;
-        }
-        if (json[i] == '"') break;
-        raw += json[i];
-        ++i;
-    }
-    out = json_unescape(raw);
-    return true;
-}
+// tiny_json.h (added upstream for snapshot.json) replaces what used to be
+// three hand-rolled helpers here. Its string parser does not decode
+// \uXXXX escapes, which is fine: fetch_art.py writes its line with
+// ensure_ascii=False and surrogateescape, so a path arrives as raw bytes
+// -- which is what the filesystem holds anyway. Only the script's
+// last-ditch fallback (reached solely if that primary write already
+// threw) can emit escapes, and a mangled path there simply reads as
+// "no art for this track", which every caller already handles.
 
 fs::path fetch_album_art(const fs::path& script_path, const std::string& title,
                          const std::string& artist) {
@@ -317,14 +218,21 @@ fs::path fetch_album_art(const fs::path& script_path, const std::string& title,
                                 " " + shell_quote(title) + " " + shell_quote(artist);
         ProcResult r = run_capture(cmd, /*merge_stderr=*/false);
 
-        // Covers all three failure shapes at once — python3 missing
+        // Covers every failure shape at once — python3 missing
         // (exit_code < 0), the script crashing before it printed
-        // anything, and a well-formed {"ok":false,...} response.
-        if (r.out.empty() || !json_get_bool(r.out, "ok", false)) return {};
+        // anything, output that isn't JSON at all, and a well-formed
+        // {"ok":false,...} response.
+        tinyjson::Value root;
+        if (r.out.empty() || !tinyjson::parse(r.out, root)) return {};
 
-        std::string path;
-        if (!json_get_string(r.out, "path", path) || path.empty()) return {};
-        return fs::path(path);
+        const tinyjson::Value* ok = root.find("ok");
+        if (!ok || !ok->as_bool(false)) return {};
+
+        const tinyjson::Value* path = root.find("path");
+        if (!path) return {};
+        const std::string p = path->as_string();
+        if (p.empty()) return {};
+        return fs::path(p);
     } catch (...) {
         return {};
     }
