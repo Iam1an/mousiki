@@ -24,6 +24,7 @@
 #include "waveform.h"
 #include "youtube_source.h"
 #include "cache_manager.h"
+#include "album_art.h"
 
 namespace muisc {
 
@@ -139,6 +140,18 @@ private:
     std::atomic<bool> lyrics_ready_{false};
     std::atomic<int> lyrics_epoch_{0};
     void launch_lyrics_fetch(std::string title, std::string artist, fs::path path, bool force_network = false);
+
+    // --- album art (background-fetched, drawn as the disc's label) ---
+    // Same shape as the lyrics fetch below it: a detached thread per
+    // track, an epoch counter so a stale fetch that lands after the user
+    // has already skipped on gets discarded rather than painting the
+    // wrong cover onto the new track.
+    mutable std::mutex art_mutex_;
+    AlbumArt album_art_;
+    std::atomic<bool> art_ready_{false};
+    std::atomic<int> art_epoch_{0};
+    fs::path art_script_;
+    void launch_art_fetch(std::string title, std::string artist);
 
     std::string status_line_;
     bool quit_ = false;

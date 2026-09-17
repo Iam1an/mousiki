@@ -47,6 +47,27 @@ foreach(kf IN LISTS KISSFFT_FILES)
 endforeach()
 
 # ---------------------------------------------------------------------------
+# stb_image.h — single-header JPEG/PNG decoder used to turn downloaded
+# album art into a grayscale bitmap for the terminal renderer. Fetched the
+# same loose-file way as miniaudio.h above (and lands in the same
+# third_party dir, which is already on the include path).
+# ---------------------------------------------------------------------------
+set(STB_DIR "${CMAKE_SOURCE_DIR}/third_party")
+set(STB_IMAGE_HEADER "${STB_DIR}/stb_image.h")
+if(NOT EXISTS "${STB_IMAGE_HEADER}")
+  message(STATUS "Downloading stb_image.h ...")
+  file(DOWNLOAD
+    "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h"
+    "${STB_IMAGE_HEADER}"
+    SHOW_PROGRESS
+    STATUS STB_DL_STATUS)
+  list(GET STB_DL_STATUS 0 STB_DL_CODE)
+  if(NOT STB_DL_CODE EQUAL 0)
+    message(FATAL_ERROR "Failed to download stb_image.h — download it manually into ${STB_DIR}/stb_image.h")
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE MUISC_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp")

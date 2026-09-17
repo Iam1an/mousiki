@@ -488,7 +488,7 @@ static Settings load_from_config(const fs::path& path) {
             {"ElimentDisk", "Eliment_disk"}, {"ElimentDummyButtons", "Element_dummy_buttons"},
             {"ElimentQueue", "Eliment_queue"}, {"ElimentWaveForm", "Eliment_waveform_progress_bar"},
             {"ElimentLyrics", "Eliment_lyrics"}, {"LyricsPlaceholderBall", "Eliment_lyrics_placeholder_ball"},
-            {"Visualizer", "Eliment_visualizer"},
+            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"},
             {"VisualizerFluidity", "visualizer_fluidity"}, {"DiskRotationSpeed", "disk_rotation_speed"},
             {"VisualizerDegradationSpeed", "visualizer_degradation_speed"}, {"VisualizerViscosity", "visualizer_viscosity"},
             {"LyricsAlignment", "lyrics_alignment"}, {"LyricsAnimation", "lyrics_animation"},
@@ -542,6 +542,7 @@ static Settings load_from_config(const fs::path& path) {
             continue;
         }
         if (key == "Eliment_visualizer" || key == "Element_visualizer") { s.element_visualizer = parse_bool(value); continue; }
+        if (key == "Album_art") { s.album_art = parse_bool(value); continue; }
 
         // --- Border characters ---
         if (key == "upper_left_corner") { s.box_upper_left = unquote(value); continue; }
@@ -825,6 +826,7 @@ void save_settings(const Settings& s) {
     out << "ElimentLyrics=" << tf(s.element_lyrics) << "\n";
     out << "LyricsPlaceholderBall=" << tf(s.element_lyrics_placeholder_ball) << "\n";
     out << "Visualizer=" << tf(s.element_visualizer) << "\n";
+    out << "AlbumArt=" << tf(s.album_art) << "\n";
     out << "\n";
 
     out << "##-------------------------------------------\n";

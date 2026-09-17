@@ -375,6 +375,9 @@ fs::path find_lyrics_script() {
 App::App() {
     settings_ = load_settings();
     lyrics_script_ = find_lyrics_script();
+    // fetch_art.py sits beside fetch_lyrics.py, so reuse whatever search
+    // path actually found the latter rather than repeating that dance.
+    if (!lyrics_script_.empty()) art_script_ = lyrics_script_.parent_path() / "fetch_art.py";
     
     // Inject the cache directory into local music paths so streamed songs
     // automatically appear in the local view for seamless offline playback
@@ -745,6 +748,35 @@ void App::launch_lyrics_fetch(std::string title, std::string artist, fs::path pa
     }).detach();
 }
 
+void App::launch_art_fetch(std::string title, std::string artist) {
+    art_ready_ = false;
+    {
+        std::lock_guard<std::mutex> lock(art_mutex_);
+        album_art_ = AlbumArt{}; // drop the previous track's cover immediately
+    }
+    if (!settings_.album_art || art_script_.empty() || title.empty()) return;
+    int my_epoch = ++art_epoch_;
+    std::thread([this, title, artist, my_epoch]() {
+        // Cached file first — no network, no subprocess, so a re-listen
+        // paints the label on the very next frame.
+        fs::path local = album_art_path(title);
+        std::error_code ec;
+        if (!fs::exists(local, ec)) {
+            local = fetch_album_art(art_script_, title, artist);
+        }
+        if (local.empty()) return;
+        // 64x64 is already finer than the label can show (a ~30-dot
+        // circle), which leaves headroom for the inverse-rotation
+        // sampling to land between source pixels without visible blocking.
+        AlbumArt art = load_album_art(local, 64);
+        if (!art.valid()) return;
+        std::lock_guard<std::mutex> lock(art_mutex_);
+        if (my_epoch != art_epoch_.load()) return; // user skipped on — discard
+        album_art_ = std::move(art);
+        art_ready_ = true;
+    }).detach();
+}
+
 void App::poll_pending_load() {
     if (!load_ready_.load()) return;
     PendingLoad pl;
@@ -785,6 +817,7 @@ void App::poll_pending_load() {
     fft_.reset(); // don't let the previous track's spectrum tail linger into this one's first frame
 
     launch_lyrics_fetch(pl.title, pl.artist, pl.path);
+    launch_art_fetch(pl.title, pl.artist);
 
     // This is the whole point of the redesign: play() is handed a
     // StreamingPcm that may have zero frames decoded yet. The audio
@@ -1277,7 +1310,7 @@ int App::settings_max_row() const {
     // track the actual font_map/about_app_lines content).
     switch (settings_tab_) {
         case 0: return 13; // COLOR_SCHEMA: 14 rows
-        case 1: return 6;  // ONOFF_SCHEMA: 7 rows
+        case 1: return 7;  // ONOFF_SCHEMA: 8 rows
         case 2: return 7;  // ANIM_SCHEMA: 8 rows
         case 3: {
             int letters = 0;
@@ -1312,6 +1345,7 @@ std::string App::settings_get_value(int row, int col) const {
             case 4: v = settings_.element_lyrics; break;
             case 5: v = settings_.element_lyrics_placeholder_ball; break;
             case 6: v = settings_.element_visualizer; break;
+            case 7: v = settings_.album_art; break;
         }
         return v ? "true" : "false";
     }
@@ -1383,6 +1417,7 @@ void App::settings_commit_edit() {
             case 4: settings_.element_lyrics = is_true; break;
             case 5: settings_.element_lyrics_placeholder_ball = is_true; break;
             case 6: settings_.element_visualizer = is_true; break;
+            case 7: settings_.album_art = is_true; break;
         }
     } else if (settings_tab_ == 2) {
         std::string v = to_lower(buf);
@@ -2016,7 +2051,18 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
 
     std::vector<std::string> disk_frame;
     if (settings_.element_disk) {
-        disk_frame = disk_.frame(angle_);
+        // The label layer needs the cover held under art_mutex_ for the
+        // duration of the render, so copying it per frame is avoided --
+        // frame_with_label() takes a raw pointer and only reads it.
+        bool drew_label = false;
+        if (settings_.album_art && art_ready_.load()) {
+            std::lock_guard<std::mutex> lock(art_mutex_);
+            if (album_art_.valid()) {
+                disk_frame = disk_.frame_with_label(angle_, album_art_.gray.data(), album_art_.size);
+                drew_label = true;
+            }
+        }
+        if (!drew_label) disk_frame = disk_.frame(angle_);
         while (static_cast<int>(disk_frame.size()) < panel_h) disk_frame.emplace_back(std::string(disk_w, ' '));
         for (size_t row_i = 0; row_i < disk_frame.size(); ++row_i) {
             float t = disk_frame.size() > 1 ? static_cast<float>(row_i) / static_cast<float>(disk_frame.size() - 1) : 0.0f;
@@ -2711,11 +2757,11 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
             y++;
         }
     } else if (settings_tab_ == 1 || settings_tab_ == 2) {
-        static const char* onoff_l[7] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
-                                          "Lyrics Engine", "Lyric Ball", "Visualizer"};
+        static const char* onoff_l[8] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
+                                          "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art"};
         static const char* anim_l[8] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
                                          "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation"};
-        int count = (settings_tab_ == 1) ? 7 : 8;
+        int count = (settings_tab_ == 1) ? 8 : 8;
         const char* const* labels = (settings_tab_ == 1) ? onoff_l : anim_l;
         for (int i = 0; i < count; ++i) {
             pos(y, 1, B(y) + "\u2502" + R); pos(y, W, B(y) + "\u2502" + R);

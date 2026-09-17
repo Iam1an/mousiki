@@ -27,6 +27,11 @@ struct Settings {
     int lyrics_animation = 0; // 0=full (default), 1=word by word, 2=letter by letter, 3=only active line, 4=only active word
     bool element_visualizer = true;
 
+    // Draw the album cover as the spinning disc's printed label (art is
+    // fetched in the background and cached; falls back to the plain disc
+    // whenever no art is available for the current track).
+    bool album_art = true;
+
     // --- appearance / tuning -------------------------------------------
     int visualizer_fluidity = 1;        // 1-10, higher = smoother/slower rise
     int visualizer_degradation_speed = 8; // 1 (slow fade) - 10 (near-instant), how fast bars fall after a drop
