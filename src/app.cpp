@@ -1346,7 +1346,11 @@ std::string App::settings_get_value(int row, int col) const {
             case 5: v = settings_.element_lyrics_placeholder_ball; break;
             case 6: v = settings_.element_visualizer; break;
             case 7: v = settings_.album_art; break;
-            case 8: v = settings_.album_art_color; break;
+
+        }
+        if (row == 8) {
+            return settings_.album_art_style == 0 ? "braille"
+                 : settings_.album_art_style == 1 ? "blocks" : "ascii";
         }
         return v ? "true" : "false";
     }
@@ -1379,7 +1383,8 @@ std::string App::settings_get_value(int row, int col) const {
 // through. Empty return = not cyclable (Colors and Reference rows,
 // exactly like the reference's g_options map has no entries for those).
 std::vector<std::string> App::settings_options_for(int tab, int row) const {
-    if (tab == 1) return {"true", "false"};
+    if (tab == 1) return row == 8 ? std::vector<std::string>{"braille", "blocks", "ascii"}
+                                   : std::vector<std::string>{"true", "false"};
     if (tab == 2) {
         switch (row) {
             case 0: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -1408,6 +1413,12 @@ void App::settings_commit_edit() {
         if (p) *p = buf;
     } else if (settings_tab_ == 1) {
         std::string v = to_lower(buf);
+        if (settings_row_ == 8) { // the style picker is an enum, not a bool
+            if (v == "braille") settings_.album_art_style = 0;
+            else if (v == "blocks") settings_.album_art_style = 1;
+            else if (v == "ascii") settings_.album_art_style = 2;
+            return;
+        }
         bool is_true = (v == "true"), is_false = (v == "false");
         if (!is_true && !is_false) return;
         switch (settings_row_) {
@@ -1419,7 +1430,7 @@ void App::settings_commit_edit() {
             case 5: settings_.element_lyrics_placeholder_ball = is_true; break;
             case 6: settings_.element_visualizer = is_true; break;
             case 7: settings_.album_art = is_true; break;
-            case 8: settings_.album_art_color = is_true; break;
+
         }
     } else if (settings_tab_ == 2) {
         std::string v = to_lower(buf);
@@ -2063,7 +2074,12 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
         bool art_is_colored = false;
         if (settings_.album_art && art_ready_.load()) {
             std::lock_guard<std::mutex> lock(art_mutex_);
-            if (settings_.album_art_color && album_art_.has_color()) {
+            if (settings_.album_art_style == 2 && album_art_.has_color()) {
+                disk_frame = disk_.frame_ascii(angle_, album_art_.rgb.data(), album_art_.size,
+                                               static_cast<double>(settings_.album_art_radius),
+                                               settings_.album_art_truecolor);
+                drew_label = art_is_colored = true;
+            } else if (settings_.album_art_style == 1 && album_art_.has_color()) {
                 disk_frame = disk_.frame_color(angle_, album_art_.rgb.data(), album_art_.size,
                                                static_cast<double>(settings_.album_art_radius),
                                                settings_.album_art_truecolor);
@@ -2771,7 +2787,7 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
     } else if (settings_tab_ == 1 || settings_tab_ == 2) {
         static const char* onoff_l[9] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
                                           "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art",
-                                          "Album Art Color"};
+                                          "Art Style"};
         static const char* anim_l[8] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
                                          "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation"};
         int count = (settings_tab_ == 1) ? 9 : 8;

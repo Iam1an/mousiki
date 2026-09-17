@@ -28,12 +28,9 @@ struct Settings {
     bool element_visualizer = true;
 
     // Draw the album cover on the spinning disc instead of the disc's own
-    // artwork. Off by default: the hand-drawn braille CD reads better than
-    // any cover reconstructed at this resolution, which is the whole point
-    // of the disc being hand-drawn in the first place. Turn it on and the
-    // cover is fetched in the background and cached; it falls back to the
-    // plain disc whenever no art is available for the current track.
-    bool album_art = false;
+    // artwork. The cover is fetched in the background and cached, and this
+    // falls back to the plain disc whenever no art is available.
+    bool album_art = true;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art
@@ -44,14 +41,13 @@ struct Settings {
     // rather than as a disc edge, and the circular mask plus the spindle
     // hole already say "disc" on their own. Clamped to 5..29 on load.
     int album_art_radius = 29;
-    // Draw the cover in colour with half-block glyphs (two coloured pixels
-    // per text cell) instead of 1-bit braille dots. Braille gives four times
-    // the dots but only one ink colour per cell, and a cover reduced to
-    // on/off dots stops reading as the cover at all; colour carries far more
-    // of the image per cell even at half the spatial resolution. Off by
-    // default, so enabling album_art gives the braille rendering that
-    // matches the disc's own character style rather than a photo mosaic.
-    bool album_art_color = false;
+    // How the cover is drawn: 0 = braille dots (1-bit, matches the disc's
+    // own character style), 1 = half-block glyphs (two coloured pixels per
+    // cell, the most spatial detail but reads as a photo mosaic), 2 = colour
+    // ASCII (one glyph per cell chosen from a density ramp and printed in
+    // that cell's colour -- half the resolution of blocks, but the glyph
+    // shapes carry texture the mosaic doesn't).
+    int album_art_style = 2;
     // 24-bit colour vs the xterm-256 cube. Defaults to whatever COLORTERM
     // advertises (see load_settings) and is only worth setting by hand if
     // your terminal lies about it in either direction.

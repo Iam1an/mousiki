@@ -46,6 +46,17 @@ public:
                                          double label_radius = 29.0,
                                          bool truecolor = true) const;
 
+    // Colour ASCII variant: one glyph per text cell, chosen from a density
+    // ramp by the sampled colour's luma and printed in that colour. Half the
+    // vertical resolution of frame_color's half-blocks (30x15 rather than
+    // 30x30), but each cell carries a shape as well as a colour, which reads
+    // as terminal art rather than as a photo mosaic. Same inverse rotation,
+    // so it turns with the disc. `rgb` is rgb_size*rgb_size*3.
+    std::vector<std::string> frame_ascii(double angle_radians,
+                                         const unsigned char* rgb, int rgb_size,
+                                         double label_radius = 29.0,
+                                         bool truecolor = true) const;
+
     int width() const { return width_; }
     int height() const { return height_; }
 

@@ -501,4 +501,72 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
     return out;
 }
 
+
+std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char* rgb,
+                                              int rgb_size, double label_radius,
+                                              bool truecolor) const {
+    // Density ramp, darkest first. Deliberately starts at '.' and not at a
+    // space: the colour escape already carries how dark a cell is, so a space
+    // would punch visible holes through the dark regions of a cover rather
+    // than shading them.
+    static const char* const kRamp[] = {".", ",", ":", ";", "=", "+", "*", "#", "%", "@"};
+    constexpr int kRampLen = 10;
+
+    // Same dot-unit coordinate space as frame() and frame_color(), so the disc
+    // lands in the same place at the same size whichever renderer drew it. A
+    // text cell spans 2 dots across and 4 down, so its centre sits at
+    // (2col + 0.5, 4row + 1.5).
+    const double cx = (src_w_ - 1) / 2.0;
+    const double cy = (src_h_ - 1) / 2.0;
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+
+    const bool has_label = rgb != nullptr && rgb_size > 0 && label_radius > 0.0;
+    const double scale = has_label ? rgb_size / (label_radius * 2.0) : 0.0;
+
+    std::vector<std::string> result;
+    result.reserve(static_cast<size_t>(height_));
+    for (int row = 0; row < height_; ++row) {
+        std::string line;
+        for (int col = 0; col < width_; ++col) {
+            const double dx = 2.0 * col + 0.5 - cx;
+            const double dy = 4.0 * row + 1.5 - cy;
+            const double r = std::sqrt(dx * dx + dy * dy);
+
+            if (!has_label || r < kSpindleRadius || r > label_radius) {
+                line += ' ';
+                continue;
+            }
+            const double sx = dx * c + dy * s;
+            const double sy = -dx * s + dy * c;
+            const int ix = static_cast<int>(sx * scale + rgb_size / 2.0);
+            const int iy = static_cast<int>(sy * scale + rgb_size / 2.0);
+            if (ix < 0 || ix >= rgb_size || iy < 0 || iy >= rgb_size) {
+                line += ' ';
+                continue;
+            }
+            const size_t off = (static_cast<size_t>(iy) * static_cast<size_t>(rgb_size)
+                                + static_cast<size_t>(ix)) * 3;
+            ColorPixel p{true, rgb[off], rgb[off + 1], rgb[off + 2]};
+
+            // Rec.601 luma, which weights green the way the eye does -- a plain
+            // channel average makes saturated greens read as bright as white
+            // and saturated blues as near-black, so the ramp would contradict
+            // the colour it is printed in.
+            const double luma = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) / 255.0;
+            int idx = static_cast<int>(luma * kRampLen);
+            if (idx >= kRampLen) idx = kRampLen - 1;
+            if (idx < 0) idx = 0;
+
+            appendColorEscape(line, false, p, truecolor);
+            line += kRamp[idx];
+            line += kReset;
+        }
+        // One glyph cell per column, exactly width_ of them: the escapes are
+        // zero-width and must never be counted by the caller's arithmetic.
+        result.push_back(std::move(line));
+    }
+    return result;
+}
+
 } // namespace muisc
