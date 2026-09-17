@@ -31,6 +31,16 @@ struct Settings {
     // fetched in the background and cached; falls back to the plain disc
     // whenever no art is available for the current track).
     bool album_art = true;
+    // How far the cover reaches, in braille dots from the disc's centre.
+    // The disc itself is ~29 dots in radius, so 29 hands the whole face to
+    // the cover, while a smaller value keeps a ring of the original CD art
+    // around it as a groove edge. Bigger is sharper: doubling the radius
+    // quadruples the dots the image gets, and at these sizes that is the
+    // difference between shapes and mush -- which is why the default hands
+    // over the whole face. A thin groove ring reads as competing outline
+    // rather than as a disc edge, and the circular mask plus the spindle
+    // hole already say "disc" on their own. Clamped to 5..29 on load.
+    int album_art_radius = 29;
 
     // --- appearance / tuning -------------------------------------------
     int visualizer_fluidity = 1;        // 1-10, higher = smoother/slower rise

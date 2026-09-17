@@ -2058,7 +2058,8 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
         if (settings_.album_art && art_ready_.load()) {
             std::lock_guard<std::mutex> lock(art_mutex_);
             if (album_art_.valid()) {
-                disk_frame = disk_.frame_with_label(angle_, album_art_.gray.data(), album_art_.size);
+                disk_frame = disk_.frame_with_label(angle_, album_art_.gray.data(), album_art_.size,
+                                                   static_cast<double>(settings_.album_art_radius));
                 drew_label = true;
             }
         }

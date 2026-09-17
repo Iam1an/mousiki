@@ -488,7 +488,7 @@ static Settings load_from_config(const fs::path& path) {
             {"ElimentDisk", "Eliment_disk"}, {"ElimentDummyButtons", "Element_dummy_buttons"},
             {"ElimentQueue", "Eliment_queue"}, {"ElimentWaveForm", "Eliment_waveform_progress_bar"},
             {"ElimentLyrics", "Eliment_lyrics"}, {"LyricsPlaceholderBall", "Eliment_lyrics_placeholder_ball"},
-            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"},
+            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"},
             {"VisualizerFluidity", "visualizer_fluidity"}, {"DiskRotationSpeed", "disk_rotation_speed"},
             {"VisualizerDegradationSpeed", "visualizer_degradation_speed"}, {"VisualizerViscosity", "visualizer_viscosity"},
             {"LyricsAlignment", "lyrics_alignment"}, {"LyricsAnimation", "lyrics_animation"},
@@ -543,6 +543,10 @@ static Settings load_from_config(const fs::path& path) {
         }
         if (key == "Eliment_visualizer" || key == "Element_visualizer") { s.element_visualizer = parse_bool(value); continue; }
         if (key == "Album_art") { s.album_art = parse_bool(value); continue; }
+        if (key == "Album_art_radius") {
+            try { s.album_art_radius = std::max(5, std::min(29, std::stoi(value))); } catch (...) {}
+            continue;
+        }
 
         // --- Border characters ---
         if (key == "upper_left_corner") { s.box_upper_left = unquote(value); continue; }
@@ -827,6 +831,7 @@ void save_settings(const Settings& s) {
     out << "LyricsPlaceholderBall=" << tf(s.element_lyrics_placeholder_ball) << "\n";
     out << "Visualizer=" << tf(s.element_visualizer) << "\n";
     out << "AlbumArt=" << tf(s.album_art) << "\n";
+    out << "AlbumArtRadius=" << s.album_art_radius << "\n";
     out << "\n";
 
     out << "##-------------------------------------------\n";
