@@ -86,116 +86,62 @@ def arm_alarm():
 
 
 # --------------------------------------------------------------------------
-# Slug: byte-for-byte port of muisc::CacheManager::sanitize()
+# Slug: byte-for-byte port of muisc::sanitize_cache_name()
 # --------------------------------------------------------------------------
 #
-# The C++ is:
+# The C++ (src/cache_manager.cpp) is:
 #
 #     for (unsigned char c : raw) {
-#         if (std::isalnum(c))            out += std::tolower(c);
+#         if      (c >= 0x80)              had_non_ascii = true;   // dropped
+#         else if (c >= 'a' && c <= 'z')   out += c;
+#         else if (c >= 'A' && c <= 'Z')   out += c - 'A' + 'a';
+#         else if (c >= '0' && c <= '9')   out += c;
 #         else if (c==' '||c=='-'||c=='_') out += '_';
-#     }                                   // everything else dropped
+#     }                                    // everything else dropped
 #     while (out.find("__") != npos) out.replace(out.find("__"), 2, "_");
 #     if (out.empty()) out = "untitled";
+#     if (had_non_ascii) out += "_" + fnv1a32_hex(raw);
 #
-# isalnum/tolower are LOCALE-DEPENDENT, and main.cpp runs setlocale(LC_ALL,"")
-# before any of this.  That matters: on macOS under a UTF-8 locale libc
-# classifies 65 of the bytes 0x80-0xFF as alnum and lowercases 0xC0-0xDE to
-# 0xE0-0xFE, so "Björk" (62 6A C3 B6 72 6B) slugs to b"bj\xe3rk" - not to
-# "bjrk" as an ASCII-only port would produce, and not valid UTF-8 either.
-# glibc and bionic classify no high byte as alnum, so there the same title
-# slugs to "bjrk".  A hardcoded table would therefore write art files where
-# the C++ never looks.  So we ask the very same libc, through the very same
-# locale sequence, and fall back to ASCII-only if that is not possible.
-#
-# KNOWN UPSTREAM BUG (src/cache_manager.cpp, not fixable from here): on macOS
-# that slug is invalid UTF-8, and APFS rejects such filenames outright -
-# fopen() gives EILSEQ (errno 92) to C and Python alike.  So non-ASCII titles
-# report {"ok":false,"error":"WRITE_FAILED",...} on macOS.  We deliberately do
-# NOT substitute a writable name: CacheManager::path_for() would compute the
-# same unopenable path and never find it, so a fallback would only hide the
-# breakage.  The real fix is to make sanitize() ASCII-only (or percent-encode
-# non-ASCII) in cache_manager.cpp, which also affects its .opus cache paths.
+# Classification is deliberately ASCII-only, so this port needs no ctypes
+# and no locale bootstrap -- an earlier version of this file had both,
+# because sanitize() used locale-dependent isalnum/tolower and the two
+# implementations had to agree byte-for-byte about 65 high bytes that macOS
+# libc calls alphanumeric. That produced filenames APFS rejects outright
+# (EILSEQ), so non-ASCII titles could never be cached at all; the C++ is
+# now ASCII-only with an FNV-1a suffix, and every platform agrees.
 
-def _ascii_table():
-    table = [b""] * 256
-    for b in range(256):
-        if 48 <= b <= 57 or 97 <= b <= 122:      # 0-9 a-z
-            table[b] = bytes((b,))
-        elif 65 <= b <= 90:                      # A-Z -> lowercase
-            table[b] = bytes((b + 32,))
-        elif b in (0x20, 0x2D, 0x5F):            # space, '-', '_'
-            table[b] = b"_"
-    return table
+_TABLE = [b""] * 256
+for _b in range(256):
+    if 48 <= _b <= 57 or 97 <= _b <= 122:        # 0-9 a-z
+        _TABLE[_b] = bytes((_b,))
+    elif 65 <= _b <= 90:                         # A-Z -> lowercase
+        _TABLE[_b] = bytes((_b + 32,))
+    elif _b in (0x20, 0x2D, 0x5F):               # space, '-', '_'
+        _TABLE[_b] = b"_"
 
 
-def _libc_table():
-    """Per-byte table built from libc's own isalnum/tolower, or None."""
-    import ctypes
-    import ctypes.util
-    import locale
-
-    # Mirror main.cpp's locale bootstrap exactly.
-    try:
-        locale.setlocale(locale.LC_ALL, "")
-    except (locale.Error, ValueError):
-        try:
-            locale.setlocale(locale.LC_ALL, "C.UTF-8")
-        except (locale.Error, ValueError):
-            pass
-    else:
-        try:
-            if locale.setlocale(locale.LC_CTYPE) == "C":
-                locale.setlocale(locale.LC_ALL, "C.UTF-8")
-        except (locale.Error, ValueError):
-            pass
-
-    name = ctypes.util.find_library("c")
-    libc = ctypes.CDLL(name) if name else ctypes.CDLL(None)
-    for fn in (libc.isalnum, libc.tolower):
-        fn.argtypes = [ctypes.c_int]
-        fn.restype = ctypes.c_int
-
-    # Sanity-check before trusting it; a wrong table is worse than ASCII.
-    if not libc.isalnum(ord("a")) or not libc.isalnum(ord("7")):
-        return None
-    if libc.isalnum(ord("!")) or libc.isalnum(ord(" ")):
-        return None
-    if libc.tolower(ord("A")) != ord("a") or libc.tolower(ord("z")) != ord("z"):
-        return None
-
-    table = [b""] * 256
-    for b in range(256):
-        if libc.isalnum(b):
-            table[b] = bytes((libc.tolower(b) & 0xFF,))
-        elif b in (0x20, 0x2D, 0x5F):
-            # Plain char comparisons in the C++, not locale-dependent.
-            table[b] = b"_"
-    return table
-
-
-def _build_table():
-    try:
-        table = _libc_table()
-        if table:
-            return table
-    except Exception:
-        pass
-    return _ascii_table()
-
-
-_TABLE = _build_table()
+def _fnv1a32_hex(raw):
+    """FNV-1a (32-bit) over `raw` bytes, as 8 lowercase hex digits."""
+    h = 0x811C9DC5
+    for b in raw:
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return b"%08x" % h
 
 
 def sanitize_bytes(raw):
-    """raw: bytes -> slug bytes (exactly what CacheManager::sanitize returns)."""
+    """raw: bytes -> slug bytes (exactly what sanitize_cache_name returns)."""
+    had_non_ascii = any(b >= 0x80 for b in raw)
     out = b"".join(_TABLE[b] for b in raw)
     # Mirrors the C++ `while (find("__") != npos) replace(pos, 2, "_")` loop,
     # which collapses any run of underscores down to one.
     while b"__" in out:
         i = out.find(b"__")
         out = out[:i] + b"_" + out[i + 2:]
-    return out or b"untitled"
+    out = out or b"untitled"
+    if had_non_ascii:
+        out += b"_" + _fnv1a32_hex(raw)
+    return out
 
 
 def sanitize(title):

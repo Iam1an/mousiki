@@ -1,4 +1,5 @@
 #include "album_art.h"
+#include "cache_manager.h"
 #include "process_util.h"
 #include "tiny_json.h"
 
@@ -163,24 +164,6 @@ AlbumArt load_album_art(const fs::path& file, int target) {
 // file has to be findable from the same title that found the audio, so if
 // these two ever disagree the art silently stops resolving. Keep the two
 // in lockstep if either changes.
-static std::string slugify(const std::string& raw) {
-    std::string out;
-    out.reserve(raw.size());
-    for (unsigned char c : raw) {
-        if (std::isalnum(c)) {
-            out += static_cast<char>(std::tolower(c));
-        } else if (c == ' ' || c == '-' || c == '_') {
-            out += '_';
-        }
-        // everything else (slashes, quotes, emoji, etc.) is dropped
-    }
-    while (out.find("__") != std::string::npos) {
-        out.replace(out.find("__"), 2, "_");
-    }
-    if (out.empty()) out = "untitled";
-    return out;
-}
-
 fs::path album_art_path(const std::string& title) {
     const char* home = std::getenv("HOME");
     fs::path base = home ? fs::path(home) : fs::path(".");
@@ -193,7 +176,7 @@ fs::path album_art_path(const std::string& title) {
     std::error_code ec;
     fs::create_directories(dir, ec);
 
-    return dir / (slugify(title) + ".jpg");
+    return dir / (sanitize_cache_name(title) + ".jpg");
 }
 
 // --- helper-script JSON ------------------------------------------------
