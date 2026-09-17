@@ -419,8 +419,23 @@ static void parse_about_app_block(std::ifstream& in, Settings& s) {
 // Load settings from config.txt
 // =====================================================================
 
+// Terminals that support 24-bit colour advertise it in COLORTERM
+// ("truecolor" or "24bit"); the TERM name does not distinguish it, since a
+// truecolor terminal typically still reports xterm-256color. Apple Terminal
+// sets COLORTERM=truecolor as of 470.x. Detected rather than assumed,
+// because guessing wrong in the 256-only direction paints unreadable
+// garbage. Applied as the DEFAULT before parsing, so an explicit
+// AlbumArtTrueColor in config.txt still wins either way.
+static bool detect_truecolor() {
+    const char* ct = std::getenv("COLORTERM");
+    if (!ct) return false;
+    const std::string v(ct);
+    return v.find("truecolor") != std::string::npos || v.find("24bit") != std::string::npos;
+}
+
 static Settings load_from_config(const fs::path& path) {
     Settings s;
+    s.album_art_truecolor = detect_truecolor();
     std::ifstream in(path);
     if (!in.is_open()) return s;
 
@@ -488,7 +503,7 @@ static Settings load_from_config(const fs::path& path) {
             {"ElimentDisk", "Eliment_disk"}, {"ElimentDummyButtons", "Element_dummy_buttons"},
             {"ElimentQueue", "Eliment_queue"}, {"ElimentWaveForm", "Eliment_waveform_progress_bar"},
             {"ElimentLyrics", "Eliment_lyrics"}, {"LyricsPlaceholderBall", "Eliment_lyrics_placeholder_ball"},
-            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"},
+            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"}, {"AlbumArtColor", "Album_art_color"}, {"AlbumArtTrueColor", "Album_art_truecolor"},
             {"VisualizerFluidity", "visualizer_fluidity"}, {"DiskRotationSpeed", "disk_rotation_speed"},
             {"VisualizerDegradationSpeed", "visualizer_degradation_speed"}, {"VisualizerViscosity", "visualizer_viscosity"},
             {"LyricsAlignment", "lyrics_alignment"}, {"LyricsAnimation", "lyrics_animation"},
@@ -543,6 +558,8 @@ static Settings load_from_config(const fs::path& path) {
         }
         if (key == "Eliment_visualizer" || key == "Element_visualizer") { s.element_visualizer = parse_bool(value); continue; }
         if (key == "Album_art") { s.album_art = parse_bool(value); continue; }
+        if (key == "Album_art_color") { s.album_art_color = parse_bool(value); continue; }
+        if (key == "Album_art_truecolor") { s.album_art_truecolor = parse_bool(value); continue; }
         if (key == "Album_art_radius") {
             try { s.album_art_radius = std::max(5, std::min(29, std::stoi(value))); } catch (...) {}
             continue;
@@ -747,6 +764,7 @@ Settings load_settings() {
     std::error_code ec;
 
     Settings s;
+    s.album_art_truecolor = detect_truecolor();
     if (fs::exists(cfg, ec)) {
         s = load_from_config(cfg);
     } else if (fs::exists(legacy_settings_path(), ec)) {
@@ -832,6 +850,8 @@ void save_settings(const Settings& s) {
     out << "Visualizer=" << tf(s.element_visualizer) << "\n";
     out << "AlbumArt=" << tf(s.album_art) << "\n";
     out << "AlbumArtRadius=" << s.album_art_radius << "\n";
+    out << "AlbumArtColor=" << tf(s.album_art_color) << "\n";
+    out << "AlbumArtTrueColor=" << tf(s.album_art_truecolor) << "\n";
     out << "\n";
 
     out << "##-------------------------------------------\n";

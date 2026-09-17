@@ -41,6 +41,16 @@ struct Settings {
     // rather than as a disc edge, and the circular mask plus the spindle
     // hole already say "disc" on their own. Clamped to 5..29 on load.
     int album_art_radius = 29;
+    // Draw the cover in colour with half-block glyphs (two coloured pixels
+    // per text cell) instead of 1-bit braille dots. Braille gives four times
+    // the dots but only one ink colour per cell, and a cover reduced to
+    // on/off dots stops reading as the cover at all; colour carries far more
+    // of the image per cell even at half the spatial resolution.
+    bool album_art_color = true;
+    // 24-bit colour vs the xterm-256 cube. Defaults to whatever COLORTERM
+    // advertises (see load_settings) and is only worth setting by hand if
+    // your terminal lies about it in either direction.
+    bool album_art_truecolor = true;
 
     // --- appearance / tuning -------------------------------------------
     int visualizer_fluidity = 1;        // 1-10, higher = smoother/slower rise

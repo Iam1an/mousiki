@@ -80,6 +80,156 @@ static std::vector<unsigned char> box_downsample(const unsigned char* src, int s
     return out;
 }
 
+// The colour counterpart to box_downsample, and deliberately NOT an
+// average. Averaging is the obvious thing to reach for and it is the wrong
+// tool for colour: a cell straddling a red region and a blue one averages
+// to a desaturated purple-grey, so a cover reduced that way arrives as
+// grey mush with every edge smeared across the cells it crosses. Taking
+// the single most prominent colour in each cell instead keeps saturation
+// intact and keeps boundaries crisp, which is what lets a 30x30
+// reconstruction still read as the cover rather than as a smudge.
+//
+// `src` is RGB (3 bytes per pixel), a `side`x`side` square starting at
+// (ox, oy) inside a `src_w`-pixel-wide buffer; the crop is applied here
+// instead of copying it out first, exactly as on the grey path. Cell
+// bounds use the same integer arithmetic box_downsample uses, so the two
+// squares describe the same cells -- a renderer reading both must never
+// find them disagreeing about where a cell begins.
+static std::vector<unsigned char> dominant_downsample(const unsigned char* src, int src_w,
+                                                      int ox, int oy, int side, int target) {
+    std::vector<unsigned char> out(static_cast<size_t>(target) * target * 3, 0);
+
+    // Colour is quantised to 4 bits per channel (16 levels each, so
+    // 16*16*16 = 4096 bins) before anything is counted, and the
+    // quantisation is the whole trick. At full 8-bit precision a block of
+    // a JPEG has almost no exact duplicates -- grain and DCT ringing give
+    // nearly every pixel its own triplet -- so "the most common colour"
+    // would degenerate into "some arbitrary pixel", i.e. noisy
+    // nearest-neighbour. Bins 16 levels wide are comfortably wider than
+    // that few-level noise, so pixels a human would call the same colour
+    // land together and actually accumulate a count. Coarser (3 bits, 512
+    // bins) starts merging colours that read as distinct -- red into
+    // orange, navy into black -- and the cell stops resolving detail;
+    // finer (5 bits, 32768 bins) re-fragments the counts and drifts back
+    // toward nearest-neighbour. 4 bits is the widest binning that still
+    // separates hues.
+    constexpr int kBits = 4;
+    constexpr int kShift = 8 - kBits;
+    constexpr int kBinCount = 1 << (3 * kBits);
+
+    // Sums are 64-bit because one cell can cover the whole source when
+    // target is small: a 5000px cover at target=1 would overflow a 32-bit
+    // accumulator at 255 per pixel.
+    struct Bin { uint64_t count, r, g, b; };
+    // Allocated once for the whole call rather than per cell. 4096 entries
+    // is also far too many to clear wholesale per cell -- that would dwarf
+    // the pixel work itself at small targets -- so `touched` records which
+    // bins a cell actually used and only those get reset afterwards.
+    std::vector<Bin> bins(kBinCount, Bin{0, 0, 0, 0});
+    std::vector<int> touched;
+
+    const size_t stride = static_cast<size_t>(src_w) * 3;
+
+    for (int ty = 0; ty < target; ++ty) {
+        int y0 = (ty * side) / target;
+        int y1 = ((ty + 1) * side) / target;
+        if (y0 >= side) y0 = side - 1;
+        if (y1 <= y0) y1 = std::min(y0 + 1, side);
+
+        for (int tx = 0; tx < target; ++tx) {
+            int x0 = (tx * side) / target;
+            int x1 = ((tx + 1) * side) / target;
+            if (x0 >= side) x0 = side - 1;
+            if (x1 <= x0) x1 = std::min(x0 + 1, side);
+
+            unsigned char* dst = &out[(static_cast<size_t>(ty) * target + tx) * 3];
+
+            // Fewer than two source pixels in the footprint means the
+            // target is finer than the source, and there is no population
+            // to take a mode of -- a "dominant colour" over one pixel is
+            // just that pixel. Sample the pixel nearest the cell's centre
+            // and move on; this degrades to pixel replication, which is
+            // what box_downsample's clamped bounds already do on the grey
+            // side.
+            if ((y1 - y0) * (x1 - x0) < 2) {
+                const int sy = std::min(((2 * ty + 1) * side) / (2 * target), side - 1);
+                const int sx = std::min(((2 * tx + 1) * side) / (2 * target), side - 1);
+                const unsigned char* p =
+                    src + static_cast<size_t>(oy + sy) * stride +
+                    static_cast<size_t>(ox + sx) * 3;
+                dst[0] = p[0];
+                dst[1] = p[1];
+                dst[2] = p[2];
+                continue;
+            }
+
+            touched.clear();
+            for (int sy = y0; sy < y1; ++sy) {
+                const unsigned char* row = src + static_cast<size_t>(oy + sy) * stride +
+                                           static_cast<size_t>(ox) * 3;
+                for (int sx = x0; sx < x1; ++sx) {
+                    const unsigned char r = row[sx * 3 + 0];
+                    const unsigned char g = row[sx * 3 + 1];
+                    const unsigned char b = row[sx * 3 + 2];
+                    const int idx = ((r >> kShift) << (2 * kBits)) |
+                                    ((g >> kShift) << kBits) |
+                                    (b >> kShift);
+                    Bin& bin = bins[static_cast<size_t>(idx)];
+                    if (bin.count == 0) touched.push_back(idx);
+                    ++bin.count;
+                    bin.r += r;
+                    bin.g += g;
+                    bin.b += b;
+                }
+            }
+
+            int best = -1;
+            uint64_t best_count = 0;
+            uint64_t best_dist = 0;
+            for (int idx : touched) {
+                const Bin& bin = bins[static_cast<size_t>(idx)];
+                // Tie-break: squared distance of the bin's own mean from
+                // mid-grey. A cell that is half flat background and half
+                // saturated detail splits its pixels evenly between two
+                // bins, and which one wins decides whether the cell shows
+                // the detail or the wash -- so ties go to whichever is
+                // further from the mid-tone. Distance from grey rather
+                // than a saturation ratio because deep shadow and specular
+                // highlight are detail too, and both sit far out along the
+                // cube's diagonal while the mush sits at its centre.
+                const int64_t dr = static_cast<int64_t>(bin.r / bin.count) - 128;
+                const int64_t dg = static_cast<int64_t>(bin.g / bin.count) - 128;
+                const int64_t db = static_cast<int64_t>(bin.b / bin.count) - 128;
+                const uint64_t dist = static_cast<uint64_t>(dr * dr + dg * dg + db * db);
+                if (bin.count > best_count || (bin.count == best_count && dist > best_dist)) {
+                    best = idx;
+                    best_count = bin.count;
+                    best_dist = dist;
+                }
+            }
+
+            if (best >= 0) {
+                // The winning bin's MEAN, not its centre. The bin centre
+                // is only accurate to 16 levels per channel, which is
+                // plainly visible as banding wherever the cover has a
+                // large smooth area (a sky, a flat sleeve background):
+                // neighbouring cells snap to the same lattice point and
+                // the gradient turns into steps. Averaging the pixels that
+                // actually landed in the bin emits a colour that really
+                // occurs in the image, so only the *selection* is
+                // quantised and the output stays smooth.
+                const Bin& bin = bins[static_cast<size_t>(best)];
+                dst[0] = static_cast<unsigned char>(bin.r / bin.count);
+                dst[1] = static_cast<unsigned char>(bin.g / bin.count);
+                dst[2] = static_cast<unsigned char>(bin.b / bin.count);
+            }
+
+            for (int idx : touched) bins[static_cast<size_t>(idx)] = Bin{0, 0, 0, 0};
+        }
+    }
+    return out;
+}
+
 // Rescales whatever range the image actually occupies onto the full
 // 0..255. Album art is very often low-contrast in grayscale terms (a dark
 // photo, a washed-out pastel sleeve), and the terminal renderer has only
@@ -131,8 +281,8 @@ AlbumArt load_album_art(const fs::path& file, int target) {
         // as if it were opaque — fine here, since cover art is opaque and
         // treating transparent regions as black would be the worse guess
         // for the odd PNG sleeve with a transparent border.
-        StbiBuffer buf{stbi_load(path.c_str(), &w, &h, &n, 1)};
-        if (!buf.p || w <= 0 || h <= 0) return art;
+        StbiBuffer gbuf{stbi_load(path.c_str(), &w, &h, &n, 1)};
+        if (!gbuf.p || w <= 0 || h <= 0) return art;
 
         // Center-crop to a square before resampling. Squashing a
         // non-square cover to fit would distort it, and cropping from a
@@ -144,11 +294,47 @@ AlbumArt load_album_art(const fs::path& file, int target) {
         const int ox = (w - side) / 2;
         const int oy = (h - side) / 2;
 
-        std::vector<unsigned char> px = box_downsample(buf.p, w, ox, oy, side, target);
+        std::vector<unsigned char> px = box_downsample(gbuf.p, w, ox, oy, side, target);
         stretch_contrast(px);
 
         art.size = target;
         art.gray = std::move(px);
+
+        // The colour square comes from a SECOND decode at req_comp=3,
+        // rather than from one RGB decode with grey derived out of it, and
+        // that is a deliberate trade. For an ordinary JFIF YCbCr JPEG,
+        // asking stb for one channel makes it decode only the Y plane and
+        // skip chroma entirely, so `gray` above is the file's own luma at
+        // full precision. Deriving grey from a 3-channel decode instead
+        // routes it through YCbCr -> clamped RGB -> stb's integer luma
+        // weights ((77r + 150g + 29b) >> 8, i.e. not the same coefficients
+        // the file was encoded with), which lands a byte or two off across
+        // most of the image. `gray` feeds a renderer that is already tuned
+        // and already correct, so the second decode buys byte-exact
+        // preservation of it -- and it is paid on the cover-load path,
+        // which is already dominated by disk and network, never per frame.
+        int cw = 0, ch = 0, cn = 0;
+        StbiBuffer cbuf{stbi_load(path.c_str(), &cw, &ch, &cn, 3)};
+        // If the colour decode fails we still return the grey square: the
+        // Braille and ASCII renderers are unaffected, and has_color() is a
+        // separate predicate precisely so that a caller can find out. A
+        // dimension mismatch between two decodes of one file by one
+        // decoder should be impossible, but the crop offsets above are
+        // only valid for (w, h) -- were it ever to happen, indexing the
+        // colour buffer with them would run off the end of it.
+        if (cbuf.p && cw == w && ch == h) {
+            // Deliberately NOT contrast-stretched, unlike `gray`. The grey
+            // path stretches because a 1-bit threshold has almost no range
+            // to spend and needs the histogram pushed out to the full
+            // 0..255 to resolve anything at all. Doing the same to colour
+            // means rescaling each channel by its own factor, which
+            // rotates hue -- a warm sleeve comes back green, a dark one
+            // comes back lurid -- and blows out whatever was already
+            // saturated. Recognisable in shape but wrong in colour is a
+            // worse result here than slightly flat, and what the half-block
+            // renderer is for is showing the cover's real colours.
+            art.rgb = dominant_downsample(cbuf.p, w, ox, oy, side, target);
+        }
         return art;
     } catch (...) {
         // Allocation failure on a pathological (huge) image, mostly.

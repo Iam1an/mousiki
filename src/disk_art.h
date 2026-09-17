@@ -34,6 +34,18 @@ public:
                                               double contrast = 1.7,
                                               bool invert = true) const;
 
+    // Colour variant: draws `rgb` (a square, row-major, 8-bit RGB image of
+    // rgb_size x rgb_size) across the disc face using half-block glyphs, two
+    // vertical pixels per text cell, with the ANSI colour already embedded in
+    // the returned strings. Rotates with the disc via the same inverse
+    // mapping frame() uses. `truecolor` selects 24-bit colour; when false the
+    // output is quantised to the xterm-256 cube for terminals without it.
+    // Returns height() lines of width() cells, exactly like frame().
+    std::vector<std::string> frame_color(double angle_radians,
+                                         const unsigned char* rgb, int rgb_size,
+                                         double label_radius = 29.0,
+                                         bool truecolor = true) const;
+
     int width() const { return width_; }
     int height() const { return height_; }
 

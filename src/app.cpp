@@ -1310,7 +1310,7 @@ int App::settings_max_row() const {
     // track the actual font_map/about_app_lines content).
     switch (settings_tab_) {
         case 0: return 13; // COLOR_SCHEMA: 14 rows
-        case 1: return 7;  // ONOFF_SCHEMA: 8 rows
+        case 1: return 8;  // ONOFF_SCHEMA: 9 rows
         case 2: return 7;  // ANIM_SCHEMA: 8 rows
         case 3: {
             int letters = 0;
@@ -1346,6 +1346,7 @@ std::string App::settings_get_value(int row, int col) const {
             case 5: v = settings_.element_lyrics_placeholder_ball; break;
             case 6: v = settings_.element_visualizer; break;
             case 7: v = settings_.album_art; break;
+            case 8: v = settings_.album_art_color; break;
         }
         return v ? "true" : "false";
     }
@@ -1418,6 +1419,7 @@ void App::settings_commit_edit() {
             case 5: settings_.element_lyrics_placeholder_ball = is_true; break;
             case 6: settings_.element_visualizer = is_true; break;
             case 7: settings_.album_art = is_true; break;
+            case 8: settings_.album_art_color = is_true; break;
         }
     } else if (settings_tab_ == 2) {
         std::string v = to_lower(buf);
@@ -2055,9 +2057,18 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
         // duration of the render, so copying it per frame is avoided --
         // frame_with_label() takes a raw pointer and only reads it.
         bool drew_label = false;
+        // The colour renderer embeds its own per-cell ANSI, so the disc
+        // gradient below must not be applied over it -- that would repaint
+        // every cell one flat colour and throw the cover away.
+        bool art_is_colored = false;
         if (settings_.album_art && art_ready_.load()) {
             std::lock_guard<std::mutex> lock(art_mutex_);
-            if (album_art_.valid()) {
+            if (settings_.album_art_color && album_art_.has_color()) {
+                disk_frame = disk_.frame_color(angle_, album_art_.rgb.data(), album_art_.size,
+                                               static_cast<double>(settings_.album_art_radius),
+                                               settings_.album_art_truecolor);
+                drew_label = art_is_colored = true;
+            } else if (album_art_.valid()) {
                 disk_frame = disk_.frame_with_label(angle_, album_art_.gray.data(), album_art_.size,
                                                    static_cast<double>(settings_.album_art_radius));
                 drew_label = true;
@@ -2065,7 +2076,7 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
         }
         if (!drew_label) disk_frame = disk_.frame(angle_);
         while (static_cast<int>(disk_frame.size()) < panel_h) disk_frame.emplace_back(std::string(disk_w, ' '));
-        for (size_t row_i = 0; row_i < disk_frame.size(); ++row_i) {
+        for (size_t row_i = 0; row_i < disk_frame.size() && !art_is_colored; ++row_i) {
             float t = disk_frame.size() > 1 ? static_cast<float>(row_i) / static_cast<float>(disk_frame.size() - 1) : 0.0f;
             std::string disk_end = settings_.disk_color_end;
             std::string row_ansi = gradient_ansi(settings_.disk_color, disk_end, t);
@@ -2758,11 +2769,12 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
             y++;
         }
     } else if (settings_tab_ == 1 || settings_tab_ == 2) {
-        static const char* onoff_l[8] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
-                                          "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art"};
+        static const char* onoff_l[9] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
+                                          "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art",
+                                          "Album Art Color"};
         static const char* anim_l[8] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
                                          "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation"};
-        int count = (settings_tab_ == 1) ? 8 : 8;
+        int count = (settings_tab_ == 1) ? 9 : 8;
         const char* const* labels = (settings_tab_ == 1) ? onoff_l : anim_l;
         for (int i = 0; i < count; ++i) {
             pos(y, 1, B(y) + "\u2502" + R); pos(y, W, B(y) + "\u2502" + R);
