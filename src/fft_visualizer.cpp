@@ -76,10 +76,21 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
     const float norm_ref = static_cast<float>(kFftSize) * static_cast<float>(kFftSize);
     const float fr = static_cast<float>(sr) / static_cast<float>(kFftSize);
 
-    static constexpr float EDGES[17] = {
+    // Full spectrum: the original log spacing, 30Hz to 12kHz.
+    static constexpr float EDGES_FULL[17] = {
         30,   50,   80,   120,  180,  250,  350,  500,
         700, 1000, 1400, 2000, 2800, 4000, 5600, 8000, 12000
     };
+    // Bass: the same 16 bands re-spaced geometrically over 25..600Hz, which
+    // is sub through low-mid -- roughly E0 to D5. Each band is about three
+    // semitones wide, so a bassline walking up a scale visibly walks across
+    // the strip rather than all landing in one band the way it does under
+    // the full-spectrum spacing.
+    static constexpr float EDGES_BASS[17] = {
+        35,  42,  51,  61,  74,  89, 108, 130,
+       157, 189, 228, 275, 331, 400, 482, 581, 700
+    };
+    const float* EDGES = (band_mode_ == 1) ? EDGES_BASS : EDGES_FULL;
     constexpr int HALF = kMaxBands / 2; // 16
 
     float right[HALF] = {};
@@ -93,7 +104,24 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
         }
         e /= static_cast<float>(hi - lo);
         float db = 10.0f * std::log10(e / norm_ref + 1e-12f);
-        right[b] = std::clamp(db + 70.0f, 0.0f, 70.0f);
+        if (band_mode_ == 1) {
+            // Bass carries far more energy than the top end, so the window
+            // that suits the full spectrum leaves this mode pinned near the
+            // ceiling and visually flat. Shift the floor down and bend the
+            // response so the gap between a kick and the room tone opens up.
+            float lvl = std::clamp(db + 66.0f, 0.0f, 70.0f);
+            // ~2 seconds at the render rate: long enough to average out the
+            // bassline itself, short enough to follow a section change.
+            band_avg_[b] = band_avg_[b] * 0.98f + lvl * 0.02f;
+            // Deviation alone reads the notes but looks dead: once each band
+            // settles at its own average the whole strip flattens to the
+            // baseline and only transients poke out. Keep most of the
+            // absolute level so the bars have body, and ADD the deviation so
+            // whichever band is currently carrying the note stands out of it.
+            right[b] = std::clamp(lvl * 0.75f + (lvl - band_avg_[b]) * 2.5f, 0.0f, 70.0f);
+        } else {
+            right[b] = std::clamp(db + 70.0f, 0.0f, 70.0f);
+        }
     }
 
     float full[kMaxBands];
@@ -108,6 +136,10 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
         float a = (full[b] > smooth_bands_[b]) ? 0.55f : 0.30f;
         smooth_bands_[b] = smooth_bands_[b] * (1.0f - a) + full[b] * a;
     }
+}
+
+void FftVisualizer::set_band_mode(int mode) {
+    band_mode_ = (mode == 1) ? 1 : 0;
 }
 
 void FftVisualizer::push_samples(const float* samples, size_t count, int sample_rate) {

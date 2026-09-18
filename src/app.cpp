@@ -1322,7 +1322,7 @@ int App::settings_max_row() const {
     switch (settings_tab_) {
         case 0: return 13; // COLOR_SCHEMA: 14 rows
         case 1: return 8;  // ONOFF_SCHEMA: 9 rows
-        case 2: return 8;  // ANIM_SCHEMA: 9 rows
+        case 2: return 9;  // ANIM_SCHEMA: 10 rows
         case 3: {
             int letters = 0;
             for (char c = 'A'; c <= 'Z'; ++c) if (settings_.font_map.count(c)) ++letters;
@@ -1407,6 +1407,7 @@ std::vector<std::string> App::settings_options_for(int tab, int row) const {
             case 6: return {"left", "center", "right"};
             case 7: return {"full", "word by word", "line by line", "letter by letter", "active line only", "active word only"};
             case 8: return {"20", "30", "40", "50", "60", "70", "80"};
+            case 9: return {"full", "bass"};
         }
     }
     return {};
@@ -1454,6 +1455,7 @@ void App::settings_commit_edit() {
             case 4: try { settings_.visualizer_degradation_speed = std::stoi(buf); } catch (...) {} break;
             case 5: try { settings_.visualizer_viscosity = std::stoi(buf); } catch (...) {} break;
             case 8: try { settings_.disk_size = std::max(20, std::min(80, std::stoi(buf))); } catch (...) {} break;
+            case 9: settings_.visualizer_band_mode = (v == "bass") ? 1 : 0; break;
             case 6: settings_.lyrics_alignment = (v == "left") ? 1 : (v == "right") ? 2 : 0; break;
             case 7:
                 if (v == "word by word") settings_.lyrics_animation = 1;
@@ -2138,6 +2140,7 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
     fft_.set_fluidity(settings_.visualizer_fluidity);
     fft_.set_degradation_speed(settings_.visualizer_degradation_speed);
     fft_.set_viscosity(settings_.visualizer_viscosity);
+    fft_.set_band_mode(settings_.visualizer_band_mode);
 
     // meta content rows
     std::vector<std::string> meta_rows(panel_h, std::string());
@@ -2826,10 +2829,10 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
         static const char* onoff_l[9] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
                                           "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art",
                                           "Art Style"};
-        static const char* anim_l[9] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
+        static const char* anim_l[10] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
                                          "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation",
-                                         "Disk Size"};
-        int count = (settings_tab_ == 1) ? 9 : 9;
+                                         "Disk Size", "Vis. Mode"};
+        int count = (settings_tab_ == 1) ? 9 : 10;
         const char* const* labels = (settings_tab_ == 1) ? onoff_l : anim_l;
         for (int i = 0; i < count; ++i) {
             pos(y, 1, B(y) + "\u2502" + R); pos(y, W, B(y) + "\u2502" + R);

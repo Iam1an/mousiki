@@ -57,6 +57,11 @@ struct Settings {
     // configured border colour. Falls back to the configured colour whenever
     // no art is loaded.
     bool ui_theme_from_art = false;
+    // Visualizer band layout: 0 = full spectrum, 1 = bass (all 16 bands
+    // spread over 25..600Hz, driven harder). Bass mode is the NCS-style
+    // look -- the strip is already mirrored with lows at the centre, this
+    // gives the bassline enough bands to actually move across it.
+    int visualizer_band_mode = 0;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art

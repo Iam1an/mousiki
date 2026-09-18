@@ -54,6 +54,13 @@ public:
     // settings feel unresponsive to sudden drops (a loud->silent moment
     // still fell at a fluid-and-heavily-blended pace instead of snapping
     // down while the rise stayed floaty).
+    // 0 = full spectrum (30Hz..12kHz across the 16 half-bands), 1 = bass:
+    // the same 16 bands re-spaced over 25..600Hz, so a bassline's movement
+    // spreads across the strip instead of living in three bands at the
+    // centre. Bass mode also drives harder -- the dB window is shifted and
+    // curved so a kick slams rather than nudging.
+    void set_band_mode(int mode);
+
     void set_fluidity(int level);
 
     // 1 (instant cutoff) .. 10 (slow fade). How fast a bar releases back
@@ -79,6 +86,15 @@ private:
 
     std::mutex mtx_; // guards ring_/ring_write_/sample_rate_ across the audio-callback/render threads
     std::array<float, kFftSize> ring_{};
+    int band_mode_ = 0; // 0 = full spectrum, 1 = bass
+    // Slow per-band average, bass mode only. Music tilts hard toward low
+    // frequencies and a kick sits in the bottom band more or less
+    // continuously, so raw levels put the peak at the bottom no matter what
+    // note is playing -- measured, the peak band wandered 0.45 bands over 25
+    // seconds, i.e. it never moved. Showing each band's deviation from its
+    // own running average cancels that fixed tilt and leaves the part that
+    // actually changes: the note.
+    std::array<float, 16> band_avg_{};
     int ring_write_ = 0;
     int sample_rate_ = 44100;
 
