@@ -503,7 +503,7 @@ static Settings load_from_config(const fs::path& path) {
             {"ElimentDisk", "Eliment_disk"}, {"ElimentDummyButtons", "Element_dummy_buttons"},
             {"ElimentQueue", "Eliment_queue"}, {"ElimentWaveForm", "Eliment_waveform_progress_bar"},
             {"ElimentLyrics", "Eliment_lyrics"}, {"LyricsPlaceholderBall", "Eliment_lyrics_placeholder_ball"},
-            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"}, {"DiskSize", "Disk_size"}, {"AlbumArtSmoothing", "Album_art_smoothing"}, {"AlbumArtGlyphs", "Album_art_glyphs"}, {"DiskOutline", "Disk_outline"}, {"UIThemeFromArt", "Ui_theme_from_art"}, {"VisualizerMode", "Visualizer_band_mode"}, {"AlbumArtStyle", "Album_art_style"}, {"AlbumArtColor", "Album_art_color"}, {"AlbumArtTrueColor", "Album_art_truecolor"},
+            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"}, {"DiskSize", "Disk_size"}, {"AlbumArtSmoothing", "Album_art_smoothing"}, {"AlbumArtGlyphs", "Album_art_glyphs"}, {"DiskOutline", "Disk_outline"}, {"UIThemeFromArt", "Ui_theme_from_art"}, {"VisualizerMode", "Visualizer_band_mode"}, {"UIThemeBrightness", "Ui_theme_brightness"}, {"AlbumArtStyle", "Album_art_style"}, {"AlbumArtColor", "Album_art_color"}, {"AlbumArtTrueColor", "Album_art_truecolor"},
             {"VisualizerFluidity", "visualizer_fluidity"}, {"DiskRotationSpeed", "disk_rotation_speed"},
             {"VisualizerDegradationSpeed", "visualizer_degradation_speed"}, {"VisualizerViscosity", "visualizer_viscosity"},
             {"LyricsAlignment", "lyrics_alignment"}, {"LyricsAnimation", "lyrics_animation"},
@@ -560,6 +560,10 @@ static Settings load_from_config(const fs::path& path) {
         if (key == "Album_art") { s.album_art = parse_bool(value); continue; }
         if (key == "Disk_outline") { s.disk_outline = parse_bool(value); continue; }
         if (key == "Ui_theme_from_art") { s.ui_theme_from_art = parse_bool(value); continue; }
+        if (key == "Ui_theme_brightness") {
+            try { s.ui_theme_brightness = std::max(100, std::min(300, std::stoi(value))); } catch (...) {}
+            continue;
+        }
         if (key == "Visualizer_band_mode") {
             std::string v = value;
             for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -887,6 +891,7 @@ void save_settings(const Settings& s) {
     out << "AlbumArtSmoothing=" << s.album_art_smoothing << "\n";
     out << "DiskOutline=" << tf(s.disk_outline) << "\n";
     out << "UIThemeFromArt=" << tf(s.ui_theme_from_art) << "\n";
+    out << "UIThemeBrightness=" << s.ui_theme_brightness << "\n";
     out << "VisualizerMode=" << (s.visualizer_band_mode == 1 ? "bass" : "full") << "\n";
     out << "AlbumArtGlyphs=" << (s.album_art_glyphs == 0 ? "density" : s.album_art_glyphs == 1 ? "hue" : "uniform") << "\n";
     out << "AlbumArtStyle=" << (s.album_art_style == 0 ? "braille" : s.album_art_style == 1 ? "blocks" : "ascii") << "\n";

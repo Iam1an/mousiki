@@ -62,6 +62,12 @@ struct Settings {
     // look -- the strip is already mirrored with lows at the centre, this
     // gives the bassline enough bands to actually move across it.
     int visualizer_band_mode = 0;
+    // Brightness applied to the cover's dominant colour before it tints the
+    // UI, as a percentage. Covers are often dark and a near-black accent is
+    // invisible against a dark terminal, so the default lifts it by half
+    // again. A floor is applied on top of this (see the render side): pure
+    // scaling can't rescue a colour that started at rgb(9,9,9). 100..300.
+    int ui_theme_brightness = 150;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art

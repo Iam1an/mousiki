@@ -777,9 +777,40 @@ void App::launch_art_fetch(std::string title, std::string artist) {
         std::lock_guard<std::mutex> lock(art_mutex_);
         if (my_epoch != art_epoch_.load()) return; // user skipped on — discard
         unsigned char tr = 0, tg = 0, tb = 0;
-        theme_ansi_ = dominant_accent(art, tr, tg, tb)
-                    ? "\x1b[38;2;" + std::to_string(tr) + ";" + std::to_string(tg) + ";" + std::to_string(tb) + "m"
-                    : std::string();
+        if (dominant_accent(art, tr, tg, tb)) {
+            // Lift the accent so a dark cover still yields UI chrome you can
+            // see. Two steps, because neither alone is enough: scale by the
+            // configured percentage, then raise the result until its
+            // brightest channel clears a floor. Scaling preserves hue and
+            // the ratios between channels, so the colour stays recognisably
+            // the cover's -- but scaling alone cannot rescue an accent that
+            // started at rgb(9,9,9), which is exactly what a near-black
+            // cover produces, hence the floor.
+            const double pct = std::clamp(settings_.ui_theme_brightness, 100, 300) / 100.0;
+            constexpr double kFloor = 170.0; // brightest channel, out of 255
+            double r = tr, g = tg, b = tb;
+            const double mx = std::max({r, g, b});
+            if (mx <= 0.0) {
+                r = g = b = kFloor; // fully black accent: fall back to grey
+            } else {
+                // Decide where the brightest channel should land, then scale
+                // everything by one factor. Clamping the TARGET rather than
+                // the result is what keeps the hue: scaling each channel and
+                // clamping afterwards drives an already-light cover to pure
+                // white, since every channel saturates independently.
+                double target = std::max(kFloor, mx * pct);
+                if (target > 255.0) target = 255.0;
+                const double lift = target / mx;
+                r *= lift; g *= lift; b *= lift;
+            }
+            const auto clamp255 = [](double v) {
+                return static_cast<int>(std::clamp(v, 0.0, 255.0) + 0.5);
+            };
+            theme_ansi_ = "\x1b[38;2;" + std::to_string(clamp255(r)) + ";"
+                        + std::to_string(clamp255(g)) + ";" + std::to_string(clamp255(b)) + "m";
+        } else {
+            theme_ansi_.clear();
+        }
         album_art_ = std::move(art);
         // Drop the previous cover's eased cells so this one appears at full
         // strength rather than fading up out of it.
