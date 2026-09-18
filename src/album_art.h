@@ -66,6 +66,14 @@ fs::path album_art_path(const std::string& title);
 // keeps this build free of an HTTP/TLS dependency, the same trade the
 // lyrics fetcher makes. Callers should treat this as slow (network) and
 // run it off the render thread.
+// The cover's most prominent *usable* colour, for tinting UI chrome. Not
+// simply the modal colour: covers are mostly background, so the plain mode
+// is nearly always a near-black or a near-white that makes a useless accent.
+// Bins are scored by population weighted toward saturation and away from the
+// extremes of lightness, and the winner's mean is returned. False if the
+// art is invalid or has no colour at all.
+bool dominant_accent(const AlbumArt& art, unsigned char& r, unsigned char& g, unsigned char& b);
+
 fs::path fetch_album_art(const fs::path& script_path, const std::string& title,
                          const std::string& artist);
 

@@ -375,6 +375,45 @@ fs::path album_art_path(const std::string& title) {
 // threw) can emit escapes, and a mangled path there simply reads as
 // "no art for this track", which every caller already handles.
 
+bool dominant_accent(const AlbumArt& art, unsigned char& out_r, unsigned char& out_g, unsigned char& out_b) {
+    if (!art.has_color()) return false;
+    // 4 bits per channel, the same bin width the per-cell downsample uses:
+    // wide enough that JPEG grain lands in one bin, narrow enough that red
+    // and orange stay apart.
+    constexpr int kBins = 16 * 16 * 16;
+    std::vector<double> score(kBins, 0.0);
+    std::vector<double> sum_r(kBins, 0.0), sum_g(kBins, 0.0), sum_b(kBins, 0.0);
+    std::vector<int> count(kBins, 0);
+
+    const size_t n = static_cast<size_t>(art.size) * static_cast<size_t>(art.size);
+    for (size_t i = 0; i < n; ++i) {
+        const int r = art.rgb[i * 3], g = art.rgb[i * 3 + 1], b = art.rgb[i * 3 + 2];
+        const int idx = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+        const double mx = std::max({r, g, b}) / 255.0;
+        const double mn = std::min({r, g, b}) / 255.0;
+        const double sat = mx <= 0.0 ? 0.0 : (mx - mn) / mx;
+        // Lightness window: pure black and pure white are common and useless
+        // as an accent, so weight them down rather than excluding them
+        // outright -- a genuinely monochrome cover should still yield
+        // something rather than nothing.
+        const double light = (mx + mn) / 2.0;
+        const double light_w = (light < 0.12 || light > 0.92) ? 0.05 : 1.0;
+        score[idx] += (0.15 + sat) * light_w;
+        sum_r[idx] += r; sum_g[idx] += g; sum_b[idx] += b;
+        ++count[idx];
+    }
+    int best = -1;
+    double best_score = 0.0;
+    for (int i = 0; i < kBins; ++i) {
+        if (count[i] && score[i] > best_score) { best_score = score[i]; best = i; }
+    }
+    if (best < 0) return false;
+    out_r = static_cast<unsigned char>(sum_r[best] / count[best] + 0.5);
+    out_g = static_cast<unsigned char>(sum_g[best] / count[best] + 0.5);
+    out_b = static_cast<unsigned char>(sum_b[best] / count[best] + 0.5);
+    return true;
+}
+
 fs::path fetch_album_art(const fs::path& script_path, const std::string& title,
                          const std::string& artist) {
     if (script_path.empty()) return {};

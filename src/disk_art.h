@@ -75,7 +75,8 @@ public:
                                          double label_radius = 29.0,
                                          bool truecolor = true,
                                          double smoothing = 1.0,
-                                         int glyph_mode = 0) const;
+                                         int glyph_mode = 0,
+                                         bool outline = false) const;
 
     // Drop the eased per-cell state. Call when the cover changes, so a new
     // track's art doesn't cross-fade out of the previous one's.

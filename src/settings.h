@@ -49,6 +49,14 @@ struct Settings {
     // information the cell is showing twice -- and gives dark areas the
     // sparsest glyph, which punches holes in them.
     int album_art_glyphs = 1;
+    // Ring the disc's outer edge with white '#'. Costs the outermost cell of
+    // cover, which at any usable disc size is the part least likely to carry
+    // anything you'd miss.
+    bool disk_outline = false;
+    // Tint the UI's borders with the cover's dominant colour instead of the
+    // configured border colour. Falls back to the configured colour whenever
+    // no art is loaded.
+    bool ui_theme_from_art = false;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art

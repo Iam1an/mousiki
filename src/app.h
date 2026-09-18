@@ -151,6 +151,13 @@ private:
     std::atomic<bool> art_ready_{false};
     std::atomic<int> art_epoch_{0};
     fs::path art_script_;
+    // Truecolor escape for the current cover's dominant colour, empty when
+    // there is no art. Read on the render thread, written under art_mutex_.
+    std::string theme_ansi_;
+    // Border colour to actually paint with: the cover's dominant colour when
+    // UIThemeFromArt is on and art is loaded, otherwise the configured one.
+    std::string border_fg() const;
+    std::string border_fg_bottom() const;
     void launch_art_fetch(std::string title, std::string artist);
 
     std::string status_line_;

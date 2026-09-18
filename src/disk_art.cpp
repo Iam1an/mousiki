@@ -543,7 +543,7 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
 std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char* rgb,
                                               int rgb_size, double label_radius,
                                               bool truecolor, double smoothing,
-                                              int glyph_mode) const {
+                                              int glyph_mode, bool outline) const {
     // Density ramp, darkest first. Deliberately starts at '.' and not at a
     // space: the colour escape already carries how dark a cell is, so a space
     // would punch visible holes through the dark regions of a cover rather
@@ -602,6 +602,16 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
 
             if (!has_label || r < kSpindleRadius * scale_ || r > radius) {
                 line += ' ';
+                continue;
+            }
+            // Outline: the outermost ring of the disc, one cell thick, drawn
+            // in white regardless of the cover underneath. Replaces the art
+            // there rather than extending past it -- the dot space has only a
+            // dot or two of margin outside the disc, nowhere near a cell.
+            if (outline && r > radius - 2.0 * scale_) {
+                appendColorEscape(line, false, ColorPixel{true, 255, 255, 255}, truecolor);
+                line += "#";
+                line += kReset;
                 continue;
             }
             // Area-average the cell's whole footprint rather than point-sampling

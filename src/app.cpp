@@ -776,6 +776,10 @@ void App::launch_art_fetch(std::string title, std::string artist) {
         if (!art.valid()) return;
         std::lock_guard<std::mutex> lock(art_mutex_);
         if (my_epoch != art_epoch_.load()) return; // user skipped on — discard
+        unsigned char tr = 0, tg = 0, tb = 0;
+        theme_ansi_ = dominant_accent(art, tr, tg, tb)
+                    ? "\x1b[38;2;" + std::to_string(tr) + ";" + std::to_string(tg) + ";" + std::to_string(tb) + "m"
+                    : std::string();
         album_art_ = std::move(art);
         // Drop the previous cover's eased cells so this one appears at full
         // strength rather than fading up out of it.
@@ -2053,6 +2057,22 @@ void App::launch_row_meta_resolver() {
 // Panel builders
 // ---------------------------------------------------------------------
 
+std::string App::border_fg() const {
+    if (settings_.ui_theme_from_art && art_ready_.load()) {
+        std::lock_guard<std::mutex> lock(art_mutex_);
+        if (!theme_ansi_.empty()) return theme_ansi_;
+    }
+    return ansi_for(settings_.border_color, false);
+}
+
+std::string App::border_fg_bottom() const {
+    if (settings_.ui_theme_from_art && art_ready_.load()) {
+        std::lock_guard<std::mutex> lock(art_mutex_);
+        if (!theme_ansi_.empty()) return theme_ansi_;
+    }
+    return ansi_for(settings_.border_color_bottom, false);
+}
+
 std::vector<std::string> App::build_metadata_panel(int total_width) const {
     const int inner = total_width - 4;
     const int disk_w = settings_.element_disk ? disk_.width() : 0;
@@ -2091,7 +2111,7 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
                 disk_frame = disk_.frame_ascii(angle_, album_art_.rgb.data(), album_art_.size,
                                                static_cast<double>(settings_.album_art_radius),
                                                settings_.album_art_truecolor, alpha,
-                                               settings_.album_art_glyphs);
+                                               settings_.album_art_glyphs, settings_.disk_outline);
                 drew_label = art_is_colored = true;
             } else if (settings_.album_art_style == 1 && album_art_.has_color()) {
                 disk_frame = disk_.frame_color(angle_, album_art_.rgb.data(), album_art_.size,
@@ -2322,12 +2342,12 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
     // here (disk_frame/meta_rows/lyric_rows) is already padded to its own
     // exact width, so the concatenation is guaranteed to equal `inner`.
     std::vector<std::string> out;
-    std::string border_ansi = ansi_for(settings_.border_color, false);
-    std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
+    std::string border_ansi = border_fg();
+    std::string border_ansi_bottom = border_fg_bottom();
     out.push_back(box_top("", total_width, border_ansi));
 
     std::string bar = border_ansi + settings_.box_vertical + "\x1b[0m";
-    std::string sep_ansi = ansi_for(settings_.border_color, false) + sep + "\x1b[0m";
+    std::string sep_ansi = border_fg() + sep + "\x1b[0m";
     for (int row = 0; row < panel_h; ++row) {
         std::string content = "";
         if (settings_.element_disk) {
@@ -2410,8 +2430,8 @@ std::vector<std::string> App::build_progress_panel(int total_width) const {
                      + color_unplayed + std::string(inner_w - filled, '-') + color_reset + "]";
     }
 
-    std::string border_ansi = ansi_for(settings_.border_color, false);
-    std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
+    std::string border_ansi = border_fg();
+    std::string border_ansi_bottom = border_fg_bottom();
     // Buttons (<<< PLAY >>>) and the volume bar now match the border
     // color rather than the separate (and, for these two elements,
     // effectively unused/inert) button_color field.
@@ -2521,8 +2541,8 @@ std::vector<std::string> App::build_search_bar(int total_width) const {
         content = "/l:" + last_local_query_;
     }
 
-    std::string border_ansi = ansi_for(settings_.border_color, false);
-    std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
+    std::string border_ansi = border_fg();
+    std::string border_ansi_bottom = border_fg_bottom();
     std::vector<std::string> out;
     int search_w = total_width - 5;
     out.push_back(box_top(label, search_w, border_ansi) + border_ansi + "╭───╮\x1b[0m");
@@ -2543,8 +2563,8 @@ std::vector<std::string> App::build_list_panel(int total_width, int height) cons
                                 : "LOCAL AUDIO FILES (sort: " + std::string(sort_mode_name(local_sort_mode_)) + ")";
     size_t total = online ? online_view_.size() : local_view_.size();
     int inner = total_width - 4;
-    std::string border_ansi = ansi_for(settings_.border_color, false);
-    std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
+    std::string border_ansi = border_fg();
+    std::string border_ansi_bottom = border_fg_bottom();
 
     std::vector<std::string> out;
     out.push_back(box_top(label, total_width, border_ansi));
@@ -2620,8 +2640,8 @@ std::vector<std::string> App::build_list_panel(int total_width, int height) cons
 
 std::vector<std::string> App::build_queue_panel(int total_width, int height) const {
     int inner = total_width - 4;
-    std::string border_ansi = ansi_for(settings_.border_color, false);
-    std::string border_ansi_bottom = ansi_for(settings_.border_color_bottom, false);
+    std::string border_ansi = border_fg();
+    std::string border_ansi_bottom = border_fg_bottom();
     std::string bar = border_ansi + settings_.box_vertical + "\x1b[0m";
     std::vector<std::string> out;
     std::string title = queue_focus_ ? "QUEUE (focused)" : "QUEUE";
@@ -2700,6 +2720,10 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
     // tab bar/hint/status at all.
     int MAX_Y = std::max(player_h - 2, 10);
     auto B = [&](int y) {
+        if (settings_.ui_theme_from_art && art_ready_.load()) {
+            std::lock_guard<std::mutex> lock(art_mutex_);
+            if (!theme_ansi_.empty()) return theme_ansi_;
+        }
         return gradient_ansi(settings_.border_color, settings_.border_color_bottom,
                               (MAX_Y > 1) ? static_cast<float>(y - 1) / (MAX_Y - 1) : 0.0f, false);
     };
@@ -2936,7 +2960,7 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
 // ---------------------------------------------------------------------
 
 void App::build_console_screen(std::ostringstream& frame, int W, int target_height) const {
-    std::string border = ansi_for(settings_.border_color, false);
+    std::string border = border_fg();
     frame << box_top("CONSOLE / LOGS", W, border) << "\n";
 
     std::vector<std::string> log_lines = ConsoleLog::instance().lines();
@@ -2962,7 +2986,7 @@ void App::build_console_screen(std::ostringstream& frame, int W, int target_heig
 // ---------------------------------------------------------------------
 
 void App::build_cheatsheet_screen(std::ostringstream& frame, int W) const {
-    std::string border = ansi_for(settings_.border_color, false);
+    std::string border = border_fg();
     frame << box_top("CHEATSHEET", W, border) << "\n";
 
     // action, human-readable description -- key shown is whatever the
@@ -3041,7 +3065,7 @@ void App::draw_floating_panel(std::ostringstream& frame, const std::vector<std::
 std::vector<std::string> App::build_bulk_add_panel() const {
     const int W = kBulkAddPanelWidth;   // 62, matches the reference design
     const int inner_w = W - 2;          // 60 -- nested box width, flush against the outer border (no gap)
-    std::string border = ansi_for(settings_.border_color, false);
+    std::string border = border_fg();
     std::string obar = border.empty() ? settings_.box_vertical : (border + settings_.box_vertical + "\x1b[0m");
     auto wrap = [&](const std::string& inner_line) { return obar + inner_line + obar; };
 
@@ -3237,7 +3261,7 @@ std::vector<std::string> App::build_retry_lyrics_panel() const {
     const int W = kRetryLyricsPanelWidth; // 62, matches the reference design
     const int label_w = 14;               // left label column, blank on box top/bottom rows
     const int box_w = W - 2 - label_w;    // 46 -- nested input box width
-    std::string border = ansi_for(settings_.border_color, false);
+    std::string border = border_fg();
     std::string obar = border.empty() ? settings_.box_vertical : (border + settings_.box_vertical + "\x1b[0m");
     auto wrap = [&](const std::string& left, const std::string& right) { return obar + left + right + obar; };
     auto label = [&](const std::string& text) { return pad_left(text, label_w - 2) + " :"; };
