@@ -61,6 +61,9 @@ public:
     // 30x30), but each cell carries a shape as well as a colour, which reads
     // as terminal art rather than as a photo mosaic. Same inverse rotation,
     // so it turns with the disc. `rgb` is rgb_size*rgb_size*3.
+    // `glyph_mode` picks what the character means: 0 = density by brightness,
+    // 1 = hue family (the colour already says how dark a cell is, so the glyph
+    // is freed to say something else), 2 = one glyph everywhere.
     // `smoothing` in [0,1] is the per-frame blend factor toward each cell's
     // newly sampled colour: 1.0 snaps instantly (the old behaviour), lower
     // values ease. Rotation is the only thing that changes a cell's content
@@ -71,7 +74,8 @@ public:
                                          const unsigned char* rgb, int rgb_size,
                                          double label_radius = 29.0,
                                          bool truecolor = true,
-                                         double smoothing = 1.0) const;
+                                         double smoothing = 1.0,
+                                         int glyph_mode = 0) const;
 
     // Drop the eased per-cell state. Call when the cover changes, so a new
     // track's art doesn't cross-fade out of the previous one's.

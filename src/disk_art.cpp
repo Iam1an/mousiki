@@ -542,13 +542,31 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
 
 std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char* rgb,
                                               int rgb_size, double label_radius,
-                                              bool truecolor, double smoothing) const {
+                                              bool truecolor, double smoothing,
+                                              int glyph_mode) const {
     // Density ramp, darkest first. Deliberately starts at '.' and not at a
     // space: the colour escape already carries how dark a cell is, so a space
     // would punch visible holes through the dark regions of a cover rather
     // than shading them.
     static const char* const kRamp[] = {".", ",", ":", ";", "=", "+", "*", "#", "%"};
     constexpr int kRampLen = 9;
+
+    // Hue-family glyphs. Every one of these has broadly similar visual weight
+    // on purpose: in this mode the colour already carries how dark a cell is,
+    // so the glyph must not encode it too -- the moment a family gets a sparse
+    // character, dark or desaturated regions go holey again, which is exactly
+    // what this mode exists to stop.
+    struct HueGlyph { double centre; const char* glyph; };
+    static const HueGlyph kHues[] = {
+        {  0.0, "*" },  // red
+        { 30.0, "+" },  // orange
+        { 60.0, "%" },  // yellow
+        {120.0, "&" },  // green
+        {180.0, "=" },  // cyan
+        {240.0, "#" },  // blue
+        {300.0, "@" },  // magenta
+    };
+    static const char* const kGreyGlyph = "o"; // desaturated -- not dark
 
     // Same dot-unit coordinate space as frame() and frame_color(), so the disc
     // lands in the same place at the same size whichever renderer drew it. A
@@ -631,17 +649,42 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
                                static_cast<unsigned char>(ag + 0.5),
                                static_cast<unsigned char>(ab + 0.5)};
 
-            // Rec.601 luma, which weights green the way the eye does -- a plain
-            // channel average makes saturated greens read as bright as white
-            // and saturated blues as near-black, so the ramp would contradict
-            // the colour it is printed in.
-            const double luma = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) / 255.0;
-            int idx = static_cast<int>(luma * kRampLen);
-            if (idx >= kRampLen) idx = kRampLen - 1;
-            if (idx < 0) idx = 0;
+            const char* glyph = nullptr;
+            if (glyph_mode == 2) {
+                glyph = "#";
+            } else if (glyph_mode == 1) {
+                const double mx = std::max({ar, ag, ab}) / 255.0;
+                const double mn = std::min({ar, ag, ab}) / 255.0;
+                const double chroma = mx - mn;
+                const double sat = mx <= 0.0 ? 0.0 : chroma / mx;
+                if (sat < 0.18 || chroma <= 0.0) {
+                    glyph = kGreyGlyph;
+                } else {
+                    double hue;
+                    if (mx * 255.0 == ar)      hue = 60.0 * std::fmod(((ag - ab) / 255.0) / chroma, 6.0);
+                    else if (mx * 255.0 == ag) hue = 60.0 * ((((ab - ar) / 255.0) / chroma) + 2.0);
+                    else                       hue = 60.0 * ((((ar - ag) / 255.0) / chroma) + 4.0);
+                    if (hue < 0.0) hue += 360.0;
+                    const HueGlyph* best = &kHues[0];
+                    double bestd = 1e9;
+                    for (const auto& h : kHues) {
+                        double d = std::fabs(hue - h.centre);
+                        if (d > 180.0) d = 360.0 - d;
+                        if (d < bestd) { bestd = d; best = &h; }
+                    }
+                    glyph = best->glyph;
+                }
+            } else {
+                // Rec.601 luma, which weights green the way the eye does.
+                const double luma = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) / 255.0;
+                int idx = static_cast<int>(luma * kRampLen);
+                if (idx >= kRampLen) idx = kRampLen - 1;
+                if (idx < 0) idx = 0;
+                glyph = kRamp[idx];
+            }
 
             appendColorEscape(line, false, p, truecolor);
-            line += kRamp[idx];
+            line += glyph;
             line += kReset;
         }
         // One glyph cell per column, exactly width_ of them: the escapes are

@@ -2088,7 +2088,8 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
                 const double alpha = 1.0 - (std::clamp(settings_.album_art_smoothing, 0, 10) / 10.0) * 0.85;
                 disk_frame = disk_.frame_ascii(angle_, album_art_.rgb.data(), album_art_.size,
                                                static_cast<double>(settings_.album_art_radius),
-                                               settings_.album_art_truecolor, alpha);
+                                               settings_.album_art_truecolor, alpha,
+                                               settings_.album_art_glyphs);
                 drew_label = art_is_colored = true;
             } else if (settings_.album_art_style == 1 && album_art_.has_color()) {
                 disk_frame = disk_.frame_color(angle_, album_art_.rgb.data(), album_art_.size,

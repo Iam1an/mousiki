@@ -43,6 +43,12 @@ struct Settings {
     // smears). Named like the visualizer's fluidity because it is the same
     // idea applied to a different surface.
     int album_art_smoothing = 5;
+    // What the ASCII glyph encodes: 0 = density by brightness, 1 = hue family,
+    // 2 = a single glyph everywhere. Brightness is already carried by the
+    // colour each glyph is printed in, so mode 0 spends the character on
+    // information the cell is showing twice -- and gives dark areas the
+    // sparsest glyph, which punches holes in them.
+    int album_art_glyphs = 1;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art
