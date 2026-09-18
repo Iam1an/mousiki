@@ -567,7 +567,8 @@ static Settings load_from_config(const fs::path& path) {
         if (key == "Visualizer_band_mode") {
             std::string v = value;
             for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            s.visualizer_band_mode = (v == "bass") ? 1 : 0;
+            s.visualizer_band_mode = (v == "sub") ? 1 : (v == "bass") ? 2
+                                   : (v == "mid") ? 3 : (v == "treble") ? 4 : 0;
             continue;
         }
         if (key == "Album_art_glyphs") {
@@ -892,7 +893,10 @@ void save_settings(const Settings& s) {
     out << "DiskOutline=" << tf(s.disk_outline) << "\n";
     out << "UIThemeFromArt=" << tf(s.ui_theme_from_art) << "\n";
     out << "UIThemeBrightness=" << s.ui_theme_brightness << "\n";
-    out << "VisualizerMode=" << (s.visualizer_band_mode == 1 ? "bass" : "full") << "\n";
+    {
+        static const char* kNames[] = {"full", "sub", "bass", "mid", "treble"};
+        out << "VisualizerMode=" << kNames[std::clamp(s.visualizer_band_mode, 0, 4)] << "\n";
+    }
     out << "AlbumArtGlyphs=" << (s.album_art_glyphs == 0 ? "density" : s.album_art_glyphs == 1 ? "hue" : "uniform") << "\n";
     out << "AlbumArtStyle=" << (s.album_art_style == 0 ? "braille" : s.album_art_style == 1 ? "blocks" : "ascii") << "\n";
     out << "AlbumArtTrueColor=" << tf(s.album_art_truecolor) << "\n";

@@ -1397,21 +1397,29 @@ std::string App::settings_get_value(int row, int col) const {
         return v ? "true" : "false";
     }
     if (settings_tab_ == 2) {
+        // Order matches anim_l[] in build_settings_screen -- Vis. Mode sits
+        // beside Waveform Style rather than at the bottom, since they are the
+        // two "what am I looking at" switches and were awkward to find apart.
         switch (row) {
             case 0: return std::to_string(settings_.visualizer_fluidity);
             case 1: return settings_.waveform_smooth ? "smooth" : "raw";
-            case 2: return std::to_string(settings_.disk_rotation_speed).substr(0, 4);
-            case 3: {
+            case 2: {
+                static const char* names[] = {"full", "sub", "bass", "mid", "treble"};
+                return names[std::clamp(settings_.visualizer_band_mode, 0, 4)];
+            }
+            case 3: return std::to_string(settings_.disk_rotation_speed).substr(0, 4);
+            case 4: {
                 static const char* names[] = {"list", "loop", "shuffle", "stop", "repeat queue"};
                 return names[std::clamp(settings_.play_mode, 0, 4)];
             }
-            case 4: return std::to_string(settings_.visualizer_degradation_speed);
-            case 5: return std::to_string(settings_.visualizer_viscosity);
-            case 6: return settings_.lyrics_alignment == 1 ? "left" : settings_.lyrics_alignment == 2 ? "right" : "center";
-            case 7: {
+            case 5: return std::to_string(settings_.visualizer_degradation_speed);
+            case 6: return std::to_string(settings_.visualizer_viscosity);
+            case 7: return settings_.lyrics_alignment == 1 ? "left" : settings_.lyrics_alignment == 2 ? "right" : "center";
+            case 8: {
                 static const char* names[] = {"full", "word by word", "letter by letter", "active line only", "active word only", "line by line"};
                 return names[std::clamp(settings_.lyrics_animation, 0, 5)];
             }
+            case 9: return std::to_string(settings_.disk_size);
         }
     }
     if (settings_tab_ == 3 && row >= 0 && row < kRefRowCount) {
@@ -1431,14 +1439,14 @@ std::vector<std::string> App::settings_options_for(int tab, int row) const {
         switch (row) {
             case 0: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
             case 1: return {"raw", "smooth"};
-            case 2: return {"0.01", "0.05", "0.10", "0.17", "0.25", "0.50", "0.75", "1.00"};
-            case 3: return {"list", "loop", "shuffle", "stop", "repeat queue"};
-            case 4: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
+            case 2: return {"full", "sub", "bass", "mid", "treble"};
+            case 3: return {"0.01", "0.05", "0.10", "0.17", "0.25", "0.50", "0.75", "1.00"};
+            case 4: return {"list", "loop", "shuffle", "stop", "repeat queue"};
             case 5: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
-            case 6: return {"left", "center", "right"};
-            case 7: return {"full", "word by word", "line by line", "letter by letter", "active line only", "active word only"};
-            case 8: return {"20", "30", "40", "50", "60", "70", "80"};
-            case 9: return {"full", "bass"};
+            case 6: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
+            case 7: return {"left", "center", "right"};
+            case 8: return {"full", "word by word", "line by line", "letter by letter", "active line only", "active word only"};
+            case 9: return {"20", "30", "40", "50", "60", "70", "80"};
         }
     }
     return {};
@@ -1481,14 +1489,15 @@ void App::settings_commit_edit() {
         switch (settings_row_) {
             case 0: try { settings_.visualizer_fluidity = std::stoi(buf); } catch (...) {} break;
             case 1: settings_.waveform_smooth = (v == "smooth"); break;
-            case 2: try { settings_.disk_rotation_speed = std::stod(buf); } catch (...) {} break;
-            case 3: settings_.play_mode = (v == "loop") ? 1 : (v == "shuffle") ? 2 : (v == "stop") ? 3 : (v == "repeat queue") ? 4 : 0; break;
-            case 4: try { settings_.visualizer_degradation_speed = std::stoi(buf); } catch (...) {} break;
-            case 5: try { settings_.visualizer_viscosity = std::stoi(buf); } catch (...) {} break;
-            case 8: try { settings_.disk_size = std::max(20, std::min(80, std::stoi(buf))); } catch (...) {} break;
-            case 9: settings_.visualizer_band_mode = (v == "bass") ? 1 : 0; break;
-            case 6: settings_.lyrics_alignment = (v == "left") ? 1 : (v == "right") ? 2 : 0; break;
-            case 7:
+            case 2: settings_.visualizer_band_mode = (v == "sub") ? 1 : (v == "bass") ? 2
+                                                   : (v == "mid") ? 3 : (v == "treble") ? 4 : 0; break;
+            case 3: try { settings_.disk_rotation_speed = std::stod(buf); } catch (...) {} break;
+            case 4: settings_.play_mode = (v == "loop") ? 1 : (v == "shuffle") ? 2 : (v == "stop") ? 3 : (v == "repeat queue") ? 4 : 0; break;
+            case 5: try { settings_.visualizer_degradation_speed = std::stoi(buf); } catch (...) {} break;
+            case 6: try { settings_.visualizer_viscosity = std::stoi(buf); } catch (...) {} break;
+            case 9: try { settings_.disk_size = std::max(20, std::min(80, std::stoi(buf))); } catch (...) {} break;
+            case 7: settings_.lyrics_alignment = (v == "left") ? 1 : (v == "right") ? 2 : 0; break;
+            case 8:
                 if (v == "word by word") settings_.lyrics_animation = 1;
                 else if (v == "letter by letter") settings_.lyrics_animation = 2;
                 else if (v == "active line only") settings_.lyrics_animation = 3;
@@ -2860,9 +2869,9 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
         static const char* onoff_l[9] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
                                           "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art",
                                           "Art Style"};
-        static const char* anim_l[10] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
-                                         "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation",
-                                         "Disk Size", "Vis. Mode"};
+        static const char* anim_l[10] = {"Vis. Fluidity", "Waveform Style", "Vis. Mode", "Disk Speed",
+                                         "Playback Mode", "Vis. Degradation", "Vis. Viscosity",
+                                         "Lyrics Alignment", "Lyrics Animation", "Disk Size"};
         int count = (settings_tab_ == 1) ? 9 : 10;
         const char* const* labels = (settings_tab_ == 1) ? onoff_l : anim_l;
         for (int i = 0; i < count; ++i) {

@@ -76,21 +76,33 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
     const float norm_ref = static_cast<float>(kFftSize) * static_cast<float>(kFftSize);
     const float fr = static_cast<float>(sr) / static_cast<float>(kFftSize);
 
-    // Full spectrum: the original log spacing, 30Hz to 12kHz.
+    // Each mode is a frequency window the 16 half-bands are spread across,
+    // geometrically, plus whether to normalise per band (see below). The full
+    // range keeps the original hand-picked log spacing; the narrow ones are
+    // generated, since hand-tuning four more tables buys nothing.
+    struct BandMode { float lo, hi; bool normalize; };
+    static const BandMode kBandModes[] = {
+        {   30.0f, 12000.0f, false }, // 0 full    -- everything
+        {   25.0f,   160.0f, true  }, // 1 sub     -- kick and sub only
+        {   35.0f,   700.0f, true  }, // 2 bass    -- sub through low-mid
+        {  200.0f,  2500.0f, true  }, // 3 mid     -- vocals and snare body
+        { 1500.0f, 12000.0f, true  }, // 4 treble  -- hats and air
+    };
     static constexpr float EDGES_FULL[17] = {
         30,   50,   80,   120,  180,  250,  350,  500,
         700, 1000, 1400, 2000, 2800, 4000, 5600, 8000, 12000
     };
-    // Bass: the same 16 bands re-spaced geometrically over 25..600Hz, which
-    // is sub through low-mid -- roughly E0 to D5. Each band is about three
-    // semitones wide, so a bassline walking up a scale visibly walks across
-    // the strip rather than all landing in one band the way it does under
-    // the full-spectrum spacing.
-    static constexpr float EDGES_BASS[17] = {
-        35,  42,  51,  61,  74,  89, 108, 130,
-       157, 189, 228, 275, 331, 400, 482, 581, 700
-    };
-    const float* EDGES = (band_mode_ == 1) ? EDGES_BASS : EDGES_FULL;
+    const int bm = (band_mode_ >= 0 && band_mode_ < 5) ? band_mode_ : 0;
+    const BandMode& mode = kBandModes[bm];
+    float edges_gen[17];
+    const float* EDGES = EDGES_FULL;
+    if (bm != 0) {
+        const float ratio = std::pow(mode.hi / mode.lo, 1.0f / 16.0f);
+        float f = mode.lo;
+        for (int i = 0; i < 17; ++i) { edges_gen[i] = f; f *= ratio; }
+        EDGES = edges_gen;
+    }
+
     constexpr int HALF = kMaxBands / 2; // 16
 
     float right[HALF] = {};
@@ -104,11 +116,13 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
         }
         e /= static_cast<float>(hi - lo);
         float db = 10.0f * std::log10(e / norm_ref + 1e-12f);
-        if (band_mode_ == 1) {
-            // Bass carries far more energy than the top end, so the window
-            // that suits the full spectrum leaves this mode pinned near the
-            // ceiling and visually flat. Shift the floor down and bend the
-            // response so the gap between a kick and the room tone opens up.
+        if (mode.normalize) {
+            // A narrow window has a strong spectral tilt of its own and a
+            // near-constant occupant (a kick in the low modes, hats in the
+            // high one), so raw levels pin the peak at one end no matter what
+            // is playing. Keep most of the absolute level for body and add
+            // each band's deviation from its own ~2s average, which is the
+            // part that actually moves.
             float lvl = std::clamp(db + 66.0f, 0.0f, 70.0f);
             // ~2 seconds at the render rate: long enough to average out the
             // bassline itself, short enough to follow a section change.
@@ -139,7 +153,7 @@ void FftVisualizer::compute_bands_locked(const std::array<float, kFftSize>& ring
 }
 
 void FftVisualizer::set_band_mode(int mode) {
-    band_mode_ = (mode == 1) ? 1 : 0;
+    band_mode_ = (mode >= 0 && mode < 5) ? mode : 0;
 }
 
 void FftVisualizer::push_samples(const float* samples, size_t count, int sample_rate) {
