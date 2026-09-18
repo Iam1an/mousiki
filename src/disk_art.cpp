@@ -295,7 +295,12 @@ DiskArt::DiskArt() {
     }
 }
 
+void DiskArt::reset_art_smoothing() {
+    smooth_valid_ = false;
+}
+
 void DiskArt::resize(int cells_wide) {
+    smooth_valid_ = false; // cell grid changed; the old eased values are meaningless
     // Odd widths would put the centre between dots and wobble the disc as it
     // turns; height is half the width so the disc stays round against a cell
     // that is roughly twice as tall as it is wide.
@@ -537,13 +542,13 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
 
 std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char* rgb,
                                               int rgb_size, double label_radius,
-                                              bool truecolor) const {
+                                              bool truecolor, double smoothing) const {
     // Density ramp, darkest first. Deliberately starts at '.' and not at a
     // space: the colour escape already carries how dark a cell is, so a space
     // would punch visible holes through the dark regions of a cover rather
     // than shading them.
-    static const char* const kRamp[] = {".", ",", ":", ";", "=", "+", "*", "#", "%", "@"};
-    constexpr int kRampLen = 10;
+    static const char* const kRamp[] = {".", ",", ":", ";", "=", "+", "*", "#", "%"};
+    constexpr int kRampLen = 9;
 
     // Same dot-unit coordinate space as frame() and frame_color(), so the disc
     // lands in the same place at the same size whichever renderer drew it. A
@@ -558,6 +563,12 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
     const double radius = label_radius * scale_; // caller quotes it in artwork units
     const double scale = has_label ? rgb_size / (radius * 2.0) : 0.0;
 
+    const size_t cells = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 3;
+    if (smooth_rgb_.size() != cells) {
+        smooth_rgb_.assign(cells, 0.0f);
+        smooth_valid_ = false;
+    }
+
     std::vector<std::string> result;
     result.reserve(static_cast<size_t>(height_));
     for (int row = 0; row < height_; ++row) {
@@ -571,17 +582,54 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
                 line += ' ';
                 continue;
             }
-            const double sx = dx * c + dy * s;
-            const double sy = -dx * s + dy * c;
-            const int ix = static_cast<int>(sx * scale + rgb_size / 2.0);
-            const int iy = static_cast<int>(sy * scale + rgb_size / 2.0);
-            if (ix < 0 || ix >= rgb_size || iy < 0 || iy >= rgb_size) {
+            // Area-average the cell's whole footprint rather than point-sampling
+            // its centre. A cell spans 2 dots across and 4 down; kTaps x kTaps
+            // samples spread over that patch mean a cell's value changes
+            // gradually as the disc turns instead of snapping when the single
+            // sampled pixel happens to cross into a neighbour -- which is what
+            // made bright glyphs pop in and out one frame at a time.
+            constexpr int kTaps = 4;
+            double ar = 0.0, ag = 0.0, ab = 0.0;
+            int hits = 0;
+            for (int ty = 0; ty < kTaps; ++ty) {
+                for (int tx = 0; tx < kTaps; ++tx) {
+                    const double tdx = 2.0 * col + (tx + 0.5) * (2.0 / kTaps) - cx;
+                    const double tdy = 4.0 * row + (ty + 0.5) * (4.0 / kTaps) - cy;
+                    const double tsx = tdx * c + tdy * s;
+                    const double tsy = -tdx * s + tdy * c;
+                    const int tix = static_cast<int>(tsx * scale + rgb_size / 2.0);
+                    const int tiy = static_cast<int>(tsy * scale + rgb_size / 2.0);
+                    if (tix < 0 || tix >= rgb_size || tiy < 0 || tiy >= rgb_size) continue;
+                    const size_t toff = (static_cast<size_t>(tiy) * static_cast<size_t>(rgb_size)
+                                         + static_cast<size_t>(tix)) * 3;
+                    ar += rgb[toff]; ag += rgb[toff + 1]; ab += rgb[toff + 2];
+                    ++hits;
+                }
+            }
+            if (hits == 0) {
                 line += ' ';
                 continue;
             }
-            const size_t off = (static_cast<size_t>(iy) * static_cast<size_t>(rgb_size)
-                                + static_cast<size_t>(ix)) * 3;
-            ColorPixel p{true, rgb[off], rgb[off + 1], rgb[off + 2]};
+            ar /= hits; ag /= hits; ab /= hits;
+
+            // Ease toward the new value. Skipped on the first frame after a
+            // reset, so a new cover appears at full strength instead of
+            // fading up out of whatever was there before.
+            const size_t si = (static_cast<size_t>(row) * static_cast<size_t>(width_)
+                               + static_cast<size_t>(col)) * 3;
+            if (smooth_valid_ && smoothing < 1.0) {
+                const double a = smoothing < 0.0 ? 0.0 : smoothing;
+                ar = smooth_rgb_[si]     + (ar - smooth_rgb_[si])     * a;
+                ag = smooth_rgb_[si + 1] + (ag - smooth_rgb_[si + 1]) * a;
+                ab = smooth_rgb_[si + 2] + (ab - smooth_rgb_[si + 2]) * a;
+            }
+            smooth_rgb_[si]     = static_cast<float>(ar);
+            smooth_rgb_[si + 1] = static_cast<float>(ag);
+            smooth_rgb_[si + 2] = static_cast<float>(ab);
+
+            ColorPixel p{true, static_cast<unsigned char>(ar + 0.5),
+                               static_cast<unsigned char>(ag + 0.5),
+                               static_cast<unsigned char>(ab + 0.5)};
 
             // Rec.601 luma, which weights green the way the eye does -- a plain
             // channel average makes saturated greens read as bright as white
@@ -600,6 +648,7 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
         // zero-width and must never be counted by the caller's arithmetic.
         result.push_back(std::move(line));
     }
+    smooth_valid_ = true;
     return result;
 }
 

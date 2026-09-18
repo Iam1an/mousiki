@@ -61,10 +61,21 @@ public:
     // 30x30), but each cell carries a shape as well as a colour, which reads
     // as terminal art rather than as a photo mosaic. Same inverse rotation,
     // so it turns with the disc. `rgb` is rgb_size*rgb_size*3.
+    // `smoothing` in [0,1] is the per-frame blend factor toward each cell's
+    // newly sampled colour: 1.0 snaps instantly (the old behaviour), lower
+    // values ease. Rotation is the only thing that changes a cell's content
+    // frame to frame, so easing is a mild temporal antialias -- it trades a
+    // little smear for killing the single-frame glyph flips that read as
+    // sparkle.
     std::vector<std::string> frame_ascii(double angle_radians,
                                          const unsigned char* rgb, int rgb_size,
                                          double label_radius = 29.0,
-                                         bool truecolor = true) const;
+                                         bool truecolor = true,
+                                         double smoothing = 1.0) const;
+
+    // Drop the eased per-cell state. Call when the cover changes, so a new
+    // track's art doesn't cross-fade out of the previous one's.
+    void reset_art_smoothing();
 
     int width() const { return width_; }
     int height() const { return height_; }
@@ -83,6 +94,12 @@ private:
     // artwork units (the spindle hole, the caller's label_radius) still mean
     // the same fraction of the disc at any size.
     double scale_ = 1.0;
+
+    // Eased per-cell colour, carried between frames for frame_ascii's
+    // temporal smoothing. Mutable because the renderers are const and this
+    // is a cache, not part of the disc's identity.
+    mutable std::vector<float> smooth_rgb_;
+    mutable bool smooth_valid_ = false;
 
     std::vector<bool> src_;
     int src_w_ = 0;

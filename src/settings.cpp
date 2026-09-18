@@ -503,7 +503,7 @@ static Settings load_from_config(const fs::path& path) {
             {"ElimentDisk", "Eliment_disk"}, {"ElimentDummyButtons", "Element_dummy_buttons"},
             {"ElimentQueue", "Eliment_queue"}, {"ElimentWaveForm", "Eliment_waveform_progress_bar"},
             {"ElimentLyrics", "Eliment_lyrics"}, {"LyricsPlaceholderBall", "Eliment_lyrics_placeholder_ball"},
-            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"}, {"DiskSize", "Disk_size"}, {"AlbumArtStyle", "Album_art_style"}, {"AlbumArtColor", "Album_art_color"}, {"AlbumArtTrueColor", "Album_art_truecolor"},
+            {"Visualizer", "Eliment_visualizer"}, {"AlbumArt", "Album_art"}, {"AlbumArtRadius", "Album_art_radius"}, {"DiskSize", "Disk_size"}, {"AlbumArtSmoothing", "Album_art_smoothing"}, {"AlbumArtStyle", "Album_art_style"}, {"AlbumArtColor", "Album_art_color"}, {"AlbumArtTrueColor", "Album_art_truecolor"},
             {"VisualizerFluidity", "visualizer_fluidity"}, {"DiskRotationSpeed", "disk_rotation_speed"},
             {"VisualizerDegradationSpeed", "visualizer_degradation_speed"}, {"VisualizerViscosity", "visualizer_viscosity"},
             {"LyricsAlignment", "lyrics_alignment"}, {"LyricsAnimation", "lyrics_animation"},
@@ -558,6 +558,10 @@ static Settings load_from_config(const fs::path& path) {
         }
         if (key == "Eliment_visualizer" || key == "Element_visualizer") { s.element_visualizer = parse_bool(value); continue; }
         if (key == "Album_art") { s.album_art = parse_bool(value); continue; }
+        if (key == "Album_art_smoothing") {
+            try { s.album_art_smoothing = std::max(0, std::min(10, std::stoi(value))); } catch (...) {}
+            continue;
+        }
         if (key == "Disk_size") {
             try { s.disk_size = std::max(20, std::min(80, std::stoi(value))); } catch (...) {}
             continue;
@@ -864,6 +868,7 @@ void save_settings(const Settings& s) {
     out << "AlbumArt=" << tf(s.album_art) << "\n";
     out << "AlbumArtRadius=" << s.album_art_radius << "\n";
     out << "DiskSize=" << s.disk_size << "\n";
+    out << "AlbumArtSmoothing=" << s.album_art_smoothing << "\n";
     out << "AlbumArtStyle=" << (s.album_art_style == 0 ? "braille" : s.album_art_style == 1 ? "blocks" : "ascii") << "\n";
     out << "AlbumArtTrueColor=" << tf(s.album_art_truecolor) << "\n";
     out << "\n";

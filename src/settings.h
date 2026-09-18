@@ -37,6 +37,12 @@ struct Settings {
     // four times the glyphs -- but the disc's footprint drives the whole
     // player panel, so a big disc needs a big terminal. Clamped to 20..80.
     int disk_size = 30;
+    // How hard the ASCII cover is eased between frames, 0..10. Rotation is
+    // the only thing that changes a cell frame to frame, so this is a
+    // temporal antialias: 0 snaps (and sparkles), 10 is heavily smoothed (and
+    // smears). Named like the visualizer's fluidity because it is the same
+    // idea applied to a different surface.
+    int album_art_smoothing = 5;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art

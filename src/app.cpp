@@ -768,14 +768,18 @@ void App::launch_art_fetch(std::string title, std::string artist) {
             local = fetch_album_art(art_script_, title, artist);
         }
         if (local.empty()) return;
-        // 64x64 is already finer than the label can show (a ~30-dot
-        // circle), which leaves headroom for the inverse-rotation
-        // sampling to land between source pixels without visible blocking.
-        AlbumArt art = load_album_art(local, 64);
+        // 256 rather than 64: the renderer area-averages each cell's whole
+        // footprint, and at 64 a cell had barely one source pixel to average,
+        // so there was nothing underneath to smooth with. Costs ~190KB and
+        // happens once per track, never per frame.
+        AlbumArt art = load_album_art(local, 256);
         if (!art.valid()) return;
         std::lock_guard<std::mutex> lock(art_mutex_);
         if (my_epoch != art_epoch_.load()) return; // user skipped on — discard
         album_art_ = std::move(art);
+        // Drop the previous cover's eased cells so this one appears at full
+        // strength rather than fading up out of it.
+        disk_.reset_art_smoothing();
         art_ready_ = true;
     }).detach();
 }
@@ -2078,9 +2082,13 @@ std::vector<std::string> App::build_metadata_panel(int total_width) const {
         if (settings_.album_art && art_ready_.load()) {
             std::lock_guard<std::mutex> lock(art_mutex_);
             if (settings_.album_art_style == 2 && album_art_.has_color()) {
+                // smoothing 0..10 maps to a per-frame blend factor: 0 snaps,
+                // 10 eases hard. Kept above 0.15 so a cell still converges in
+                // a handful of frames rather than lagging visibly behind.
+                const double alpha = 1.0 - (std::clamp(settings_.album_art_smoothing, 0, 10) / 10.0) * 0.85;
                 disk_frame = disk_.frame_ascii(angle_, album_art_.rgb.data(), album_art_.size,
                                                static_cast<double>(settings_.album_art_radius),
-                                               settings_.album_art_truecolor);
+                                               settings_.album_art_truecolor, alpha);
                 drew_label = art_is_colored = true;
             } else if (settings_.album_art_style == 1 && album_art_.has_color()) {
                 disk_frame = disk_.frame_color(angle_, album_art_.rgb.data(), album_art_.size,
