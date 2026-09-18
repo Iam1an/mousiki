@@ -132,18 +132,23 @@ std::vector<int> WaveformQuantizer::resample_for_ui(const std::vector<float>& hi
 static bool stream_decode_miniaudio(const fs::path& file_path, StreamingPcm& pcm,
                                      const std::function<void(const float*, size_t)>& on_chunk) {
     ma_decoder decoder;
-    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 1, 44100);
+    // Decode to whatever the destination buffer is configured for, so a
+    // stereo buffer gets real stereo and a mono one still gets a downmix
+    // from miniaudio rather than us doing it afterwards.
+    const ma_uint32 ch = static_cast<ma_uint32>(pcm.channels > 0 ? pcm.channels : 1);
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, ch, 44100);
     if (ma_decoder_init_file(file_path.string().c_str(), &config, &decoder) != MA_SUCCESS) {
         return false; // let the caller fall back to the ffmpeg path (e.g. Opus, which this can't touch)
     }
 
-    float buf[4096];
+    float buf[4096]; // interleaved when ch > 1
     ma_uint64 frames_read = 0;
     for (;;) {
-        ma_result result = ma_decoder_read_pcm_frames(&decoder, buf, 4096, &frames_read);
+        ma_result result = ma_decoder_read_pcm_frames(&decoder, buf, 4096 / ch, &frames_read);
         if (frames_read > 0) {
-            pcm.append(buf, static_cast<size_t>(frames_read));
-            if (on_chunk) on_chunk(buf, static_cast<size_t>(frames_read));
+            const size_t samples = static_cast<size_t>(frames_read) * ch;
+            pcm.append(buf, samples);
+            if (on_chunk) on_chunk(buf, samples);
         }
         if (result != MA_SUCCESS || frames_read == 0) break;
     }
@@ -168,8 +173,9 @@ static void stream_decode_ffmpeg_fallback(const fs::path& file_path, StreamingPc
     // `file:` prefix -- see metadata_probe.cpp's ff_path(): without it a
     // filename containing ':' is read as a protocol and the decode fails
     // outright, which for Opus (this path) means the track simply never plays.
+    const int ch = pcm.channels > 0 ? pcm.channels : 1;
     std::string cmd = "ffmpeg -nostdin -v error -i " + shell_quote("file:" + file_path.string())
-                     + " -f f32le -ac 1 -ar 44100 -";
+                     + " -f f32le -ac " + std::to_string(ch) + " -ar 44100 -";
 
     int out_pipe[2];
     if (pipe(out_pipe) != 0) {
@@ -268,6 +274,18 @@ void stream_decode_ffmpeg(const fs::path& file_path, StreamingPcm& pcm,
         return;
     }
     stream_decode_ffmpeg_fallback(file_path, pcm, on_chunk);
+}
+
+std::vector<float> downmix_to_mono(const std::vector<float>& interleaved, int channels) {
+    const int ch = channels > 0 ? channels : 1;
+    if (ch == 1) return interleaved;
+    std::vector<float> mono(interleaved.size() / static_cast<size_t>(ch));
+    for (size_t f = 0; f < mono.size(); ++f) {
+        float sum = 0.0f;
+        for (int c = 0; c < ch; ++c) sum += interleaved[f * static_cast<size_t>(ch) + static_cast<size_t>(c)];
+        mono[f] = sum / static_cast<float>(ch);
+    }
+    return mono;
 }
 
 } // namespace muisc

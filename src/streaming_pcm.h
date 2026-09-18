@@ -23,17 +23,34 @@ namespace muisc {
 // a use-after-free on a mid-playback reallocation touched by another
 // thread. That trade is worth it here.
 struct StreamingPcm {
-    std::vector<float> data;
-    std::atomic<size_t> available{0};   // frames safe to read right now
+    std::vector<float> data;          // INTERLEAVED when channels > 1
+    // Samples safe to read right now -- NOT frames. It is whatever append()
+    // published, i.e. data.size(), and in stereo one frame is two samples.
+    // The two were identical while this was mono-only and the old comment
+    // said "frames", which is exactly the sort of thing that turns into an
+    // off-by-channels bug: read frames_available() when you mean frames.
+    std::atomic<size_t> available{0};
     std::atomic<bool> decode_done{false};
     std::atomic<bool> decode_failed{false};
     std::atomic<bool> capacity_exceeded{false}; // diagnostic only
     int sample_rate = 44100;
+    int channels = 1;
 
-    void reserve_for_seconds(double seconds, int sr) {
+    // Frames (sample groups across all channels) safe to read right now.
+    size_t frames_available() const {
+        const int ch = channels > 0 ? channels : 1;
+        return available.load(std::memory_order_acquire) / static_cast<size_t>(ch);
+    }
+
+    void reserve_for_seconds(double seconds, int sr, int ch = 1) {
         sample_rate = sr;
-        size_t est = static_cast<size_t>(std::max(1.0, seconds) * sr * 1.25); // 25% headroom
-        data.reserve(std::max<size_t>(est, static_cast<size_t>(sr) * 5)); // at least 5s worth
+        channels = ch > 0 ? ch : 1;
+        // Capacity is in SAMPLES, so it scales with channel count -- getting
+        // this wrong would silently halve a stereo track, since append()
+        // refuses to grow past capacity rather than reallocating (see above).
+        const size_t per_sec = static_cast<size_t>(sr) * static_cast<size_t>(channels);
+        size_t est = static_cast<size_t>(std::max(1.0, seconds) * per_sec * 1.25); // 25% headroom
+        data.reserve(std::max<size_t>(est, per_sec * 5)); // at least 5s worth
     }
 
     // Decode thread only.

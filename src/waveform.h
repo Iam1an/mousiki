@@ -60,6 +60,11 @@ public:
 // `pcm` when finished. `on_chunk`, if given, is called after each chunk
 // with the chunk that was just produced — used to feed the live FFT
 // visualizer without it needing to touch `pcm` directly.
+// Interleaved -> mono, averaging channels. The envelope generator and the
+// spectrum analyser both want a single channel; this is the one place that
+// knows how to get there, so neither has to learn about interleaving.
+std::vector<float> downmix_to_mono(const std::vector<float>& interleaved, int channels);
+
 void stream_decode_ffmpeg(const fs::path& file_path, StreamingPcm& pcm,
                            const std::function<void(const float*, size_t)>& on_chunk = nullptr);
 

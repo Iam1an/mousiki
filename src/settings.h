@@ -68,6 +68,10 @@ struct Settings {
     // again. A floor is applied on top of this (see the render side): pure
     // scaling can't rescue a colour that started at rgb(9,9,9). 100..300.
     int ui_theme_brightness = 150;
+    // Decode and play in stereo. The whole pipeline was mono end to end --
+    // device, both decoders -- so a stereo file was summed into one channel
+    // and heard identically in both ears. Off keeps exactly the old path.
+    bool stereo = true;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art

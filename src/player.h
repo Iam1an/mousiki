@@ -73,6 +73,7 @@ private:
     std::shared_ptr<StreamingPcm> pcm_;
     FftVisualizer* fft_sink_ = nullptr;
     int sample_rate_ = 44100;
+    int channels_ = 1;
     std::atomic<long long> cursor_frames_{0};
     std::atomic<bool> finished_{false};
     std::atomic<float> gain_{0.7f};

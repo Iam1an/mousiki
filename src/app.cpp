@@ -684,7 +684,8 @@ void App::launch_load_async(fs::path local_path, std::string title, std::string 
         pl.total_sec = duration > 0 ? static_cast<size_t>(duration) : 0;
 
         pl.pcm = std::make_shared<StreamingPcm>();
-        pl.pcm->reserve_for_seconds(duration > 0 ? duration : 300.0, 44100);
+        pl.pcm->reserve_for_seconds(duration > 0 ? duration : 300.0, 44100,
+                                    settings_.stereo ? 2 : 1);
         pl.success = true;
 
         write_load_timing_log(pl.title, is_local, t_resolve, t_probe, elapsed_s(t_start), "");
@@ -721,7 +722,12 @@ void App::launch_load_async(fs::path local_path, std::string title, std::string 
                 // biggest reason the waveform appeared so late after
                 // playback started, because it doubled the working-set
                 // size and stalled the RMS pass behind a large memcpy.
-                auto envelope = WaveformQuantizer::generate_high_res_envelope(pcm->data, 4096, waveform_smooth);
+                // The envelope is a single trace, so interleaved stereo has
+                // to be collapsed first -- feeding it raw would interleave
+                // left and right into alternating bins and halve the
+                // effective time resolution.
+                const std::vector<float> mono = downmix_to_mono(pcm->data, pcm->channels);
+                auto envelope = WaveformQuantizer::generate_high_res_envelope(mono, 4096, waveform_smooth);
                 std::lock_guard<std::mutex> lk(waveform_mutex_);
                 pending_waveform_envelope_ = std::move(envelope);
                 waveform_pending_ready_ = true;
@@ -2061,7 +2067,8 @@ void App::recompute_waveform_for_current_track() {
         size_t n = pcm->available.load(std::memory_order_acquire);
         if (n == 0) return;
         std::vector<float> snapshot(pcm->data.begin(), pcm->data.begin() + static_cast<long>(n));
-        auto envelope = WaveformQuantizer::generate_high_res_envelope(snapshot, 4096, smooth);
+        const std::vector<float> mono = downmix_to_mono(snapshot, pcm->channels);
+        auto envelope = WaveformQuantizer::generate_high_res_envelope(mono, 4096, smooth);
         std::lock_guard<std::mutex> lk(waveform_mutex_);
         if (my_epoch != waveform_epoch_.load()) return; // superseded — discard
         pending_waveform_envelope_ = std::move(envelope);
