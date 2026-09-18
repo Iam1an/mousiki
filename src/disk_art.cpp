@@ -556,17 +556,21 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
     // so the glyph must not encode it too -- the moment a family gets a sparse
     // character, dark or desaturated regions go holey again, which is exactly
     // what this mode exists to stop.
-    struct HueGlyph { double centre; const char* glyph; };
+    // Three glyphs per family, light to heavy, so a cover that is
+    // overwhelmingly one hue still varies instead of collapsing to a single
+    // character. None of the three is a dot: brightness picks WITHIN a family
+    // here, it never drops the cell to sparse the way the density ramp did.
+    struct HueGlyph { double centre; const char* glyph[3]; };
     static const HueGlyph kHues[] = {
-        {  0.0, "*" },  // red
-        { 30.0, "+" },  // orange
-        { 60.0, "%" },  // yellow
-        {120.0, "&" },  // green
-        {180.0, "=" },  // cyan
-        {240.0, "#" },  // blue
-        {300.0, "@" },  // magenta
+        {  0.0, {"-", "*", "#"} },  // red
+        { 30.0, {"~", "+", "%"} },  // orange
+        { 60.0, {"=", "%", "@"} },  // yellow
+        {120.0, {"-", "&", "#"} },  // green
+        {180.0, {"~", "=", "#"} },  // cyan
+        {240.0, {"-", "+", "#"} },  // blue
+        {300.0, {"=", "*", "@"} },  // magenta
     };
-    static const char* const kGreyGlyph = "o"; // desaturated -- not dark
+    static const char* const kGreyGlyph[3] = {"-", "o", "#"}; // desaturated, not dark
 
     // Same dot-unit coordinate space as frame() and frame_color(), so the disc
     // lands in the same place at the same size whichever renderer drew it. A
@@ -657,8 +661,12 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
                 const double mn = std::min({ar, ag, ab}) / 255.0;
                 const double chroma = mx - mn;
                 const double sat = mx <= 0.0 ? 0.0 : chroma / mx;
+                // Weight index within whichever family wins. Rec.601 luma, so
+                // saturated greens don't read as bright as white.
+                const double fam_luma = (0.299 * ar + 0.587 * ag + 0.114 * ab) / 255.0;
+                const int w = fam_luma < 0.33 ? 0 : (fam_luma < 0.66 ? 1 : 2);
                 if (sat < 0.18 || chroma <= 0.0) {
-                    glyph = kGreyGlyph;
+                    glyph = kGreyGlyph[w];
                 } else {
                     double hue;
                     if (mx * 255.0 == ar)      hue = 60.0 * std::fmod(((ag - ab) / 255.0) / chroma, 6.0);
@@ -672,7 +680,7 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
                         if (d > 180.0) d = 360.0 - d;
                         if (d < bestd) { bestd = d; best = &h; }
                     }
-                    glyph = best->glyph;
+                    glyph = best->glyph[w];
                 }
             } else {
                 // Rec.601 luma, which weights green the way the eye does.

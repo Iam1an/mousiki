@@ -1318,7 +1318,7 @@ int App::settings_max_row() const {
     switch (settings_tab_) {
         case 0: return 13; // COLOR_SCHEMA: 14 rows
         case 1: return 8;  // ONOFF_SCHEMA: 9 rows
-        case 2: return 7;  // ANIM_SCHEMA: 8 rows
+        case 2: return 8;  // ANIM_SCHEMA: 9 rows
         case 3: {
             int letters = 0;
             for (char c = 'A'; c <= 'Z'; ++c) if (settings_.font_map.count(c)) ++letters;
@@ -1402,6 +1402,7 @@ std::vector<std::string> App::settings_options_for(int tab, int row) const {
             case 5: return {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
             case 6: return {"left", "center", "right"};
             case 7: return {"full", "word by word", "line by line", "letter by letter", "active line only", "active word only"};
+            case 8: return {"20", "30", "40", "50", "60", "70", "80"};
         }
     }
     return {};
@@ -1448,6 +1449,7 @@ void App::settings_commit_edit() {
             case 3: settings_.play_mode = (v == "loop") ? 1 : (v == "shuffle") ? 2 : (v == "stop") ? 3 : (v == "repeat queue") ? 4 : 0; break;
             case 4: try { settings_.visualizer_degradation_speed = std::stoi(buf); } catch (...) {} break;
             case 5: try { settings_.visualizer_viscosity = std::stoi(buf); } catch (...) {} break;
+            case 8: try { settings_.disk_size = std::max(20, std::min(80, std::stoi(buf))); } catch (...) {} break;
             case 6: settings_.lyrics_alignment = (v == "left") ? 1 : (v == "right") ? 2 : 0; break;
             case 7:
                 if (v == "word by word") settings_.lyrics_animation = 1;
@@ -2800,9 +2802,10 @@ void App::build_settings_screen(std::ostringstream& frame, int W, int player_h) 
         static const char* onoff_l[9] = {"Eliment Disk", "Dummy Buttons", "Queue Display", "WaveForm",
                                           "Lyrics Engine", "Lyric Ball", "Visualizer", "Album Art",
                                           "Art Style"};
-        static const char* anim_l[8] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
-                                         "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation"};
-        int count = (settings_tab_ == 1) ? 9 : 8;
+        static const char* anim_l[9] = {"Vis. Fluidity", "Waveform Style", "Disk Speed", "Playback Mode",
+                                         "Vis. Degradation", "Vis. Viscosity", "Lyrics Alignment", "Lyrics Animation",
+                                         "Disk Size"};
+        int count = (settings_tab_ == 1) ? 9 : 9;
         const char* const* labels = (settings_tab_ == 1) ? onoff_l : anim_l;
         for (int i = 0; i < count; ++i) {
             pos(y, 1, B(y) + "\u2502" + R); pos(y, W, B(y) + "\u2502" + R);
@@ -3360,6 +3363,14 @@ std::string App::render_frame(TerminalIO& term) {
     // off -- the terminal did, one line later than expected. Lowering the
     // floor so the app actually renders to the real width instead of
     // always assuming at least 80 columns are available.
+    // Picked up live, so changing Disk Size in the settings panel takes
+    // effect on the next frame rather than at the next launch.
+    // Compared against the even-rounded value resize() will actually settle
+    // on: an odd setting would otherwise never match what the disc reports
+    // and would re-resize on every single frame.
+    const int wanted = settings_.disk_size + (settings_.disk_size & 1);
+    if (disk_.width() != wanted) disk_.resize(wanted);
+
     int W = std::clamp(term_cols, 40, 200);
 
     // Real terminal row count -- see term_rows_'s comment in app.h for
