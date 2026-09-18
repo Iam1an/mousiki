@@ -21,24 +21,52 @@ void Player::data_callback(ma_device* device, void* output, const void* /*input*
     StreamingPcm& pcm = *self->pcm_;
     long long cur = self->cursor_frames_.load();
     float gain = self->gain_.load();
+    const int ch = self->channels_ > 0 ? self->channels_ : 1;
     // Acquire-load: pairs with the release-store in StreamingPcm::append(),
     // guaranteeing every index below `avail` was fully written by the
-    // decode thread before we read it here.
+    // decode thread before we read it here. `avail` counts SAMPLES, so the
+    // comparison below is against an interleaved index, not a frame number.
     size_t avail = pcm.available.load(std::memory_order_acquire);
 
     for (ma_uint32 i = 0; i < frame_count; ++i) {
-        long long idx = cur + static_cast<long long>(i);
-        out[i] = (idx >= 0 && static_cast<size_t>(idx) < avail) ? pcm.data[static_cast<size_t>(idx)] * gain : 0.0f;
+        const long long f = cur + static_cast<long long>(i);
+        for (int c = 0; c < ch; ++c) {
+            const long long idx = f * ch + c;
+            out[i * ch + c] = (idx >= 0 && static_cast<size_t>(idx) < avail)
+                            ? pcm.data[static_cast<size_t>(idx)] * gain
+                            : 0.0f;
+        }
     }
 
-    if (self->fft_sink_) self->fft_sink_->push_samples(out, frame_count, self->sample_rate_);
+    // The spectrum analyser wants mono. Downmix into a small fixed buffer in
+    // chunks rather than allocating: this runs on the audio callback thread,
+    // where an allocation is a real risk of a dropout.
+    if (self->fft_sink_) {
+        if (ch == 1) {
+            self->fft_sink_->push_samples(out, frame_count, self->sample_rate_);
+        } else {
+            constexpr ma_uint32 kChunk = 1024;
+            float mono[kChunk];
+            ma_uint32 done = 0;
+            while (done < frame_count) {
+                const ma_uint32 n = std::min(kChunk, frame_count - done);
+                for (ma_uint32 i = 0; i < n; ++i) {
+                    float sum = 0.0f;
+                    for (int c = 0; c < ch; ++c) sum += out[(done + i) * ch + c];
+                    mono[i] = sum / static_cast<float>(ch);
+                }
+                self->fft_sink_->push_samples(mono, n, self->sample_rate_);
+                done += n;
+            }
+        }
+    }
 
     long long new_cur = cur + static_cast<long long>(frame_count);
-    // Only truly "finished" once decode is done AND playback has caught
-    // all the way up to everything it ever produced — not just the
-    // current available count, which may still be growing while we play.
+    // Only truly "finished" once decode is done AND playback has caught all
+    // the way up to everything it ever produced. Compared in samples, since
+    // that is what `available` counts.
     if (pcm.decode_done.load() &&
-        new_cur >= 0 && static_cast<size_t>(new_cur) >= pcm.available.load(std::memory_order_acquire)) {
+        new_cur >= 0 && static_cast<size_t>(new_cur * ch) >= pcm.available.load(std::memory_order_acquire)) {
         self->finished_.store(true);
     }
     self->cursor_frames_.store(new_cur);
@@ -58,6 +86,7 @@ bool Player::play(std::shared_ptr<StreamingPcm> pcm, double start_sec, int volum
     pcm_ = std::move(pcm);
     fft_sink_ = fft_sink;
     sample_rate_ = pcm_->sample_rate > 0 ? pcm_->sample_rate : 44100;
+    channels_ = pcm_->channels > 0 ? pcm_->channels : 1;
     volume_pct_ = std::clamp(volume_pct, 0, 100);
     gain_.store(volume_pct_ / 100.0f);
     finished_.store(false);
@@ -66,7 +95,7 @@ bool Player::play(std::shared_ptr<StreamingPcm> pcm, double start_sec, int volum
 
     ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
     cfg.playback.format = ma_format_f32;
-    cfg.playback.channels = 1;
+    cfg.playback.channels = static_cast<ma_uint32>(channels_);
     cfg.sampleRate = static_cast<ma_uint32>(sample_rate_);
     cfg.dataCallback = data_callback;
     cfg.pUserData = this;
@@ -105,7 +134,9 @@ void Player::seek_relative(double delta_sec) {
     // Clamp against reserved capacity (the eventual max), not the
     // currently-decoded amount — seeking a bit ahead of what's decoded
     // so far is fine, it just plays silence until decode catches up.
-    long long cap = static_cast<long long>(pcm_->data.capacity());
+    // Capacity is in samples; the cursor is in frames.
+    const int ch = channels_ > 0 ? channels_ : 1;
+    long long cap = static_cast<long long>(pcm_->data.capacity() / static_cast<size_t>(ch));
     long long next = std::clamp<long long>(cur + delta_frames, 0, cap);
     cursor_frames_.store(next);
     if (next < cap) finished_.store(false);
