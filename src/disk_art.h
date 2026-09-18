@@ -18,6 +18,15 @@ class DiskArt {
 public:
     DiskArt();
 
+    // Re-target the disc to `cells_wide` text cells across. Height follows at
+    // half that, because a terminal cell is about twice as tall as it is
+    // wide, which is what keeps the disc round. The hand-drawn source art
+    // stays at its native 30x15 and is scaled into the new dot space, so the
+    // plain disc still looks like itself; the art renderers gain real
+    // resolution, which is the point -- at 30 cells an ASCII cover has only
+    // 450 glyphs to work with.
+    void resize(int cells_wide);
+
     // One rotated frame at `angle_radians`, as printable lines (no trailing
     // newlines). Always `height()` lines of `width()` Braille cells each.
     std::vector<std::string> frame(double angle_radians) const;
@@ -65,6 +74,16 @@ private:
     // src_w_ x src_h_ (== width_*2 by height_*4). Built once in the ctor and
     // never rotated — the frame methods rotate their sampling coordinates
     // instead, which is the whole point of the inverse mapping.
+    // The hand-drawn artwork at its native size, kept separate from `src_`
+    // so resize() can rescale into the working bitmap without re-decoding.
+    std::vector<bool> art_;
+    int art_w_ = 0;
+    int art_h_ = 0;
+    // Dot-space size relative to the artwork's own 60x60, so radii quoted in
+    // artwork units (the spindle hole, the caller's label_radius) still mean
+    // the same fraction of the disc at any size.
+    double scale_ = 1.0;
+
     std::vector<bool> src_;
     int src_w_ = 0;
     int src_h_ = 0;

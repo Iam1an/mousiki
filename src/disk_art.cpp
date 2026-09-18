@@ -265,9 +265,11 @@ DiskArt::DiskArt() {
     // The old per-frame dot decode, done exactly once: the dots land in a
     // fixed source image that every frame samples, instead of being carried
     // around by the rotation.
-    src_w_ = width_ * 2;
-    src_h_ = height_ * 4;
-    src_.assign(static_cast<size_t>(src_w_) * static_cast<size_t>(src_h_), false);
+    art_w_ = width_ * 2;
+    art_h_ = height_ * 4;
+    art_.assign(static_cast<size_t>(art_w_) * static_cast<size_t>(art_h_), false);
+    src_w_ = art_w_;
+    src_h_ = art_h_;
 
     for (int row = 0; row < height_; ++row) {
         int col = 0;
@@ -282,13 +284,40 @@ DiskArt::DiskArt() {
                         if (!b[dy][dx]) continue;
                         const int x = col * 2 + dx;
                         const int y = row * 4 + dy;
-                        if (x < src_w_ && y < src_h_) {
-                            src_[static_cast<size_t>(y) * static_cast<size_t>(src_w_) + x] = true;
+                        if (x < art_w_ && y < art_h_) {
+                            art_[static_cast<size_t>(y) * static_cast<size_t>(art_w_) + x] = true;
                         }
                     }
                 }
             }
             ++col;
+        }
+    }
+}
+
+void DiskArt::resize(int cells_wide) {
+    // Odd widths would put the centre between dots and wobble the disc as it
+    // turns; height is half the width so the disc stays round against a cell
+    // that is roughly twice as tall as it is wide.
+    if (cells_wide < 8) cells_wide = 8;
+    if (cells_wide % 2) ++cells_wide;
+    width_ = cells_wide;
+    height_ = cells_wide / 2;
+    src_w_ = width_ * 2;
+    src_h_ = height_ * 4;
+    scale_ = art_w_ > 0 ? static_cast<double>(src_w_) / static_cast<double>(art_w_) : 1.0;
+
+    // Nearest-neighbour rescale of the artwork into the working bitmap. The
+    // art is a 1-bit dot drawing, so interpolating it would only produce dots
+    // that are half-lit, which braille cannot represent anyway.
+    src_.assign(static_cast<size_t>(src_w_) * static_cast<size_t>(src_h_), false);
+    if (art_w_ <= 0 || art_h_ <= 0) return;
+    for (int y = 0; y < src_h_; ++y) {
+        const int ay = std::min(art_h_ - 1, static_cast<int>(y / scale_));
+        for (int x = 0; x < src_w_; ++x) {
+            const int ax = std::min(art_w_ - 1, static_cast<int>(x / scale_));
+            if (art_[static_cast<size_t>(ay) * static_cast<size_t>(art_w_) + ax])
+                src_[static_cast<size_t>(y) * static_cast<size_t>(src_w_) + x] = true;
         }
     }
 }
@@ -332,15 +361,18 @@ std::vector<std::string> DiskArt::frame_with_label(double angle, const unsigned 
     const double s = std::sin(angle);
 
     const bool has_label = gray != nullptr && gray_size > 0 && label_radius > 0.0;
+    // The caller quotes label_radius in the artwork's own dot units, so it
+    // scales with the disc like every other radius here.
+    const double radius = label_radius * scale_;
     // Cover pixels per Braille dot across the label's diameter.
-    const double scale = has_label ? gray_size / (label_radius * 2.0) : 0.0;
+    const double scale = has_label ? gray_size / (radius * 2.0) : 0.0;
 
     for (int y = 0; y < src_h_; ++y) {
         for (int x = 0; x < src_w_; ++x) {
             const double dx = x - cx;
             const double dy = y - cy;
             const double r = std::sqrt(dx * dx + dy * dy);
-            if (r < kSpindleRadius) continue; // bare plastic — never lit
+            if (r < kSpindleRadius * scale_) continue; // bare plastic — never lit
 
             // The same inverse rotation frame() uses, and it is applied to the
             // label as well as the disc art: both are sampled in the disc's
@@ -352,12 +384,12 @@ std::vector<std::string> DiskArt::frame_with_label(double angle, const unsigned 
             // See kLabelRimWidth: keep a bare ring just outside the label so
             // it always reads as a separate printed disc, whatever the cover's
             // overall tone happens to be.
-            if (has_label && r > label_radius && r <= label_radius + kLabelRimWidth) continue;
+            if (has_label && r > radius && r <= radius + kLabelRimWidth) continue;
 
             bool lit = false;
-            if (has_label && r <= label_radius) {
-                const int gx = static_cast<int>((sx + label_radius) * scale);
-                const int gy = static_cast<int>((sy + label_radius) * scale);
+            if (has_label && r <= radius) {
+                const int gx = static_cast<int>((sx + radius) * scale);
+                const int gy = static_cast<int>((sy + radius) * scale);
                 if (gx < 0 || gx >= gray_size || gy < 0 || gy >= gray_size) continue;
                 double v = gray[static_cast<size_t>(gy) * static_cast<size_t>(gray_size) + gx] / 255.0;
                 // Stretch around mid-grey, so a cover that is mostly one tone
@@ -407,7 +439,8 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
     const bool has_label = rgb != nullptr && rgb_size > 0 && label_radius > 0.0;
     // Cover pixels per dot across the label's diameter — the same scale
     // frame_with_label() uses, since the radius is in the same dot units.
-    const double scale = has_label ? rgb_size / (label_radius * 2.0) : 0.0;
+    const double radius = label_radius * scale_; // caller quotes it in artwork units
+    const double scale = has_label ? rgb_size / (radius * 2.0) : 0.0;
 
     for (int y = 0; y < ph; ++y) {
         for (int x = 0; x < pw; ++x) {
@@ -422,7 +455,7 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
             // be confused with, and a blank ring would just read as a chip out
             // of the artwork.
             if (r < kSpindleRadius) continue;
-            if (!has_label || r > label_radius) continue;
+            if (!has_label || r > radius) continue;
 
             // The same inverse mapping frame() uses, for the same reason:
             // walking the destination and rotating each pixel back by -angle
@@ -435,8 +468,8 @@ std::vector<std::string> DiskArt::frame_color(double angle, const unsigned char*
             const double sx = dx * c + dy * s;
             const double sy = -dx * s + dy * c;
 
-            const int gx = static_cast<int>((sx + label_radius) * scale);
-            const int gy = static_cast<int>((sy + label_radius) * scale);
+            const int gx = static_cast<int>((sx + radius) * scale);
+            const int gy = static_cast<int>((sy + radius) * scale);
             if (gx < 0 || gx >= rgb_size || gy < 0 || gy >= rgb_size) continue;
 
             // Nearest-neighbour, matching the dot renderer. No bilinear filter:
@@ -522,7 +555,8 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
     const double s = std::sin(angle);
 
     const bool has_label = rgb != nullptr && rgb_size > 0 && label_radius > 0.0;
-    const double scale = has_label ? rgb_size / (label_radius * 2.0) : 0.0;
+    const double radius = label_radius * scale_; // caller quotes it in artwork units
+    const double scale = has_label ? rgb_size / (radius * 2.0) : 0.0;
 
     std::vector<std::string> result;
     result.reserve(static_cast<size_t>(height_));
@@ -533,7 +567,7 @@ std::vector<std::string> DiskArt::frame_ascii(double angle, const unsigned char*
             const double dy = 4.0 * row + 1.5 - cy;
             const double r = std::sqrt(dx * dx + dy * dy);
 
-            if (!has_label || r < kSpindleRadius || r > label_radius) {
+            if (!has_label || r < kSpindleRadius * scale_ || r > radius) {
                 line += ' ';
                 continue;
             }

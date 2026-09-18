@@ -374,6 +374,9 @@ fs::path find_lyrics_script() {
 
 App::App() {
     settings_ = load_settings();
+    // The disc's cell size drives the whole metadata panel's geometry, so it
+    // has to be settled before anything measures a panel.
+    disk_.resize(settings_.disk_size);
     lyrics_script_ = find_lyrics_script();
     // fetch_art.py sits beside fetch_lyrics.py, so reuse whatever search
     // path actually found the latter rather than repeating that dance.

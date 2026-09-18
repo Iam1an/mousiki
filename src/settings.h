@@ -31,6 +31,12 @@ struct Settings {
     // artwork. The cover is fetched in the background and cached, and this
     // falls back to the plain disc whenever no art is available.
     bool album_art = true;
+    // Disc width in text cells; height follows at half. The default matches
+    // the hand-drawn artwork's own size. Larger is worth it for the art
+    // renderers -- cells scale with the square, so 60 gives an ASCII cover
+    // four times the glyphs -- but the disc's footprint drives the whole
+    // player panel, so a big disc needs a big terminal. Clamped to 20..80.
+    int disk_size = 30;
     // How far the cover reaches, in braille dots from the disc's centre.
     // The disc itself is ~29 dots in radius, so 29 hands the whole face to
     // the cover, while a smaller value keeps a ring of the original CD art
