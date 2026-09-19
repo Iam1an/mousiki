@@ -165,7 +165,10 @@ static void stream_decode_ffmpeg_fallback(const fs::path& file_path, StreamingPc
     // keyboard input. Belt-and-suspenders -- the real fix is the stdin
     // redirect below, which means ffmpeg never even sees our terminal's
     // fd, but this makes the intent explicit and costs nothing.
-    std::string cmd = "ffmpeg -nostdin -v error -i " + shell_quote(file_path.string())
+    // `file:` prefix -- see metadata_probe.cpp's ff_path(): without it a
+    // filename containing ':' is read as a protocol and the decode fails
+    // outright, which for Opus (this path) means the track simply never plays.
+    std::string cmd = "ffmpeg -nostdin -v error -i " + shell_quote("file:" + file_path.string())
                      + " -f f32le -ac 1 -ar 44100 -";
 
     int out_pipe[2];

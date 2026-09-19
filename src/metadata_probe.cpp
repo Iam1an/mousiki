@@ -13,9 +13,18 @@ static std::string to_upper(std::string s) {
     return s;
 }
 
+// ffmpeg and ffprobe parse anything before a ':' as a PROTOCOL, so a file
+// called "Goldie: Sea of Tears.opus" comes back "Protocol not found" -- no
+// duration, no tags, and (through the decode path) no playback at all. The
+// `file:` prefix forces it to be read as a path. Harmless on every other
+// name, so it is applied unconditionally rather than only when a ':' appears.
+static std::string ff_path(const fs::path& p) {
+    return shell_quote("file:" + p.string());
+}
+
 double probe_duration_seconds(const fs::path& file) {
     std::string cmd = "ffprobe -v error -show_entries format=duration -of csv=p=0 "
-                       + shell_quote(file.string());
+                       + ff_path(file);
     ProcResult r = run_capture(cmd);
     if (r.out.empty()) return -1.0;
     try {
@@ -31,7 +40,7 @@ RowMeta probe_row_meta(const fs::path& file) {
     // on the STREAM, so asking only for format_tags reports no artist at all
     // for every .opus file -- which is most of a yt-dlp-fed library.
     std::string cmd = "ffprobe -v error -show_entries format=duration:format_tags=artist:stream_tags=artist "
-                       "-of default=noprint_wrappers=1 " + shell_quote(file.string());
+                       "-of default=noprint_wrappers=1 " + ff_path(file);
     ProcResult r = run_capture(cmd);
     if (r.out.empty()) return rm;
 
@@ -76,7 +85,7 @@ TrackMetadata probe_metadata(const fs::path& file, const std::string& fallback_n
     std::string cmd = "ffprobe -v error "
                        "-show_entries format=duration:format_tags=artist,date,title:"
                        "stream=sample_rate,codec_name:stream_tags=artist,date,title "
-                       "-of default=noprint_wrappers=1 " + shell_quote(file.string());
+                       "-of default=noprint_wrappers=1 " + ff_path(file);
     ProcResult r = run_capture(cmd);
     if (!r.ok() && r.out.empty()) return md;
 
