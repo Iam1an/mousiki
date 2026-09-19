@@ -27,7 +27,10 @@ double probe_duration_seconds(const fs::path& file) {
 
 RowMeta probe_row_meta(const fs::path& file) {
     RowMeta rm;
-    std::string cmd = "ffprobe -v error -show_entries format=duration:format_tags=artist "
+    // stream_tags as well as format_tags: Ogg/Opus keeps its Vorbis comments
+    // on the STREAM, so asking only for format_tags reports no artist at all
+    // for every .opus file -- which is most of a yt-dlp-fed library.
+    std::string cmd = "ffprobe -v error -show_entries format=duration:format_tags=artist:stream_tags=artist "
                        "-of default=noprint_wrappers=1 " + shell_quote(file.string());
     ProcResult r = run_capture(cmd);
     if (r.out.empty()) return rm;
@@ -68,8 +71,11 @@ TrackMetadata probe_metadata(const fs::path& file, const std::string& fallback_n
         md.file_size = oss.str();
     }
 
+    // stream_tags alongside format_tags -- see probe_row_meta above: an Opus
+    // file carries its tags on the stream and answers nothing otherwise.
     std::string cmd = "ffprobe -v error "
-                       "-show_entries format=duration:format_tags=artist,date,title:stream=sample_rate,codec_name "
+                       "-show_entries format=duration:format_tags=artist,date,title:"
+                       "stream=sample_rate,codec_name:stream_tags=artist,date,title "
                        "-of default=noprint_wrappers=1 " + shell_quote(file.string());
     ProcResult r = run_capture(cmd);
     if (!r.ok() && r.out.empty()) return md;
