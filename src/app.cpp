@@ -2085,7 +2085,15 @@ void App::launch_row_meta_resolver() {
             std::string key = p.string();
             {
                 std::lock_guard<std::mutex> lk(row_meta_mutex_);
-                if (row_meta_cache_.count(key)) continue; // native parse (or an earlier pass) already got it
+                // Skip only rows that already have an ARTIST. The render
+                // thread fills this cache with duration-only entries from the
+                // native header parser for every row that scrolls into view,
+                // and those carry no artist -- so a plain `count(key)` check
+                // here meant any row you could see claimed the entry first and
+                // never got the ffprobe pass that reads its tags. That is why
+                // the artist column stayed "-" even on properly tagged files.
+                auto it = row_meta_cache_.find(key);
+                if (it != row_meta_cache_.end() && !it->second.artist.empty()) continue;
             }
             RowMeta rm = probe_row_meta(p); // ffprobe fallback — slow, but background-thread-only now
             std::lock_guard<std::mutex> lk(row_meta_mutex_);
