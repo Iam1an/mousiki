@@ -17,6 +17,7 @@ Standard library only - no third-party packages.
 """
 
 import json
+import re
 import os
 import signal
 import sys
@@ -179,28 +180,81 @@ def looks_like_image(data):
     return False
 
 
-def pick_result(results, artist):
+def _norm(text):
+    """Lowercase, drop bracketed asides and punctuation, collapse spaces."""
+    t = (text or "").lower()
+    t = re.sub(r"\((?:feat|ft|with)[^)]*\)", " ", t)
+    t = re.sub(r"\[[^]]*\]", " ", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return " ".join(t.split())
+
+
+def _title_matches(want_title, have_title):
+    """Does `have_title` plausibly name the same song as `want_title`?
+
+    Token containment in either direction, so "stop breathing" matches
+    "Stop Breathing (Remix)" and vice versa, but not "Type Shit".
+    """
+    a, b = set(_norm(want_title).split()), set(_norm(have_title).split())
+    if not a or not b:
+        return False
+    return a <= b or b <= a
+
+
+def split_artist_title(title, artist):
+    """Recover an artist from an "Artist - Title" filename.
+
+    The app calls this script with the track's filename stem as the title and
+    an empty artist, because downloads deliberately carry no tags. Without an
+    artist the title alone decides, and a common title lands on whoever Apple
+    ranks first -- "Playboi Carti - Stop Breathing" matched LL Clawz's song of
+    the same name. The name is right there in the filename; use it.
+
+    Only splits on " - " with spaces, so "Wolf-Like Me" and "20 Min" survive.
+    """
+    if artist and artist.strip():
+        return title, artist
+    if " - " in title:
+        left, right = title.split(" - ", 1)
+        if left.strip() and right.strip():
+            return right.strip(), left.strip()
+    return title, artist
+
+
+def pick_result(results, title, artist):
     """Return (chosen, exact).
 
-    Prefer a result whose artistName case-insensitively matches the passed
-    artist (either string containing the other).  Otherwise take the first
-    result and flag the match as non-exact.  Only results that actually
-    carry artwork are considered.
+    The title MUST match. This used to fall back to the first result
+    whenever it could not confirm the artist, which is how "Playboi Carti -
+    Stop Breathing" ended up with the WE DON'T TRUST YOU cover: Apple ranked
+    a track Carti merely features on first, its name ("Type Shit") bore no
+    relation to the request, and the old code took it anyway. Apple's
+    catalogue simply does not carry every album -- Whole Lotta Red is absent
+    -- and for those a wrong cover is strictly worse than none, because the
+    wrong one gets cached and looks deliberate. So: no title match, no art.
+
+    The artist, when known, only decides BETWEEN title matches.
     """
     usable = [r for r in results
-              if isinstance(r, dict) and r.get("artworkUrl100")]
+              if isinstance(r, dict) and r.get("artworkUrl100")
+              and _title_matches(title, r.get("trackName"))]
     if not usable:
         return None, False
 
     want = (artist or "").strip().lower()
-    if want:
-        for r in usable:
-            have = str(r.get("artistName") or "").strip().lower()
-            if have and (want in have or have in want):
-                return r, True
+    if not want:
+        return usable[0], False
 
-    return usable[0], False
+    for r in usable:
+        have = str(r.get("artistName") or "").strip().lower()
+        if have and (want in have or have in want):
+            return r, True
 
+    # Artist known, and nothing with the right title is by them. Apple's
+    # catalogue is missing plenty of albums (Whole Lotta Red, MUSIC), and in
+    # that gap a same-titled song by someone else is not a near miss -- it is
+    # a different record. Report nothing and let the disc stay blank.
+    return None, False
 
 def save_atomic(path, data):
     """Temp file + rename, so an interrupted write never leaves a non-empty
@@ -266,9 +320,13 @@ def run():
     if not results:
         fail("NOT_FOUND", "no iTunes results for: %s" % term)
 
-    chosen, exact = pick_result(results, artist)
+    # Matching uses the recovered artist/title; the CACHE SLUG keeps using the
+    # original title argument, or the app would look for the art under a name
+    # this script never wrote.
+    match_title, match_artist = split_artist_title(title, artist)
+    chosen, exact = pick_result(results, match_title, match_artist)
     if chosen is None:
-        fail("NOT_FOUND", "no artwork in iTunes results for: %s" % term)
+        fail("NOT_FOUND", "no iTunes result matching the title: %s" % title)
 
     # artworkUrl100 ends in .../100x100bb.jpg; ask for the 600px render.
     art_url = str(chosen.get("artworkUrl100") or "")
