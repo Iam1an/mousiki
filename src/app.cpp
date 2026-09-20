@@ -950,6 +950,20 @@ void App::poll_pending_search() {
 }
 
 void App::play_selected() {
+    // With the queue focused, Enter means the row under the cursor -- it used
+    // to play the LIST's selection instead, which is the wrong panel entirely.
+    // Everything above the chosen row is dropped: picking the fourth item is
+    // a statement about what you want next, so the three you skipped are not
+    // still pending.
+    if (queue_focus_ && !queue_.empty()) {
+        int idx = std::clamp(queue_selected_, 0, static_cast<int>(queue_.size()) - 1);
+        if (idx > 0) queue_.erase(queue_.begin(), queue_.begin() + idx);
+        queue_selected_ = 0;
+        clamp_queue_selected();
+        play_next_from_queue();
+        return;
+    }
+
     size_t list_len = (list_source_ == ListSource::Local) ? local_view_.size() : online_view_.size();
     if (list_len == 0 || selected_ < 0 || selected_ >= static_cast<int>(list_len)) return;
     if (list_source_ == ListSource::Local) start_local_track(local_view_[selected_]);
@@ -974,6 +988,19 @@ int App::current_track_list_index() const {
 }
 
 void App::play_relative(int delta) {
+    // Forward with a queue waiting means "play the next queued track", not
+    // "step down the library list". The queue was only ever consumed by
+    // advance_track() when a track ran to its natural end, so pressing next
+    // walked past an up-next list without touching it -- you could queue five
+    // songs and never reach them except by letting each track play out.
+    // Backwards deliberately still walks the list: a FIFO queue has no
+    // well-defined previous, which is the same reason advance_track() has no
+    // backwards branch.
+    if (delta > 0 && !queue_.empty()) {
+        play_next_from_queue();
+        return;
+    }
+
     size_t list_len = (list_source_ == ListSource::Local) ? local_view_.size() : online_view_.size();
     if (list_len == 0) return;
     // Relative to what's actually *playing*, not wherever the hover
